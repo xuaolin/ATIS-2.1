@@ -240,6 +240,19 @@ function updateHealth() {
 }
 function setMapStatus(text) { els.mapStatus.textContent = text; }
 
+function setLayersPanel(open) {
+  if (!els.layerBox || !els.layersToggleBtn) return;
+  els.layerBox.classList.toggle('is-collapsed', !open);
+  els.layersToggleBtn.classList.toggle('active', open);
+  els.layersToggleBtn.setAttribute('aria-expanded', String(open));
+  els.layerBox.setAttribute('aria-hidden', String(!open));
+}
+
+function toggleLayersPanel() {
+  const open = els.layerBox?.classList.contains('is-collapsed');
+  setLayersPanel(!!open);
+}
+
 function initMap() {
   if (!window.L) {
     mapReady = false;
@@ -285,7 +298,8 @@ function initMap() {
   });
 
   map.on('contextmenu', ev => openMapContextMenu(ev.originalEvent, ev.latlng));
-  map.on('click', () => closeMapContextMenu());
+  map.on('click', () => { closeMapContextMenu(); setLayersPanel(false); });
+  map.on('movestart', () => setLayersPanel(false));
 
   mapReady = true;
   syncLayerVisibility();
@@ -569,7 +583,7 @@ function createManualEvent(formData) {
 function cacheElements() {
   [
     'clock','dateLabel','systemHealth','healthText','openQuickCreateBtn','newEventBtn','eventSearch','filterRow','queueCount','lastRefresh','eventQueue',
-    'fitEventsBtn','refreshBtn','mapStatus','mapHint','eventDrawer','closeDrawerBtn','detailSource','detailTitle','detailPriority','detailStatus','detailId','detailType',
+    'fitEventsBtn','refreshBtn','layersToggleBtn','layerBox','closeLayersBtn','mapStatus','mapHint','eventDrawer','closeDrawerBtn','detailSource','detailTitle','detailPriority','detailStatus','detailId','detailType',
     'detailStart','detailUpdated','detailDescription','statusRail','undoStatusBtn','primaryWorkflowBtn','cameraCommandBtn','moreActionsBtn','detailTabs','actionGrid',
     'noteInput','addNoteBtn','notesList','nearestCameraBtn','exportEventBtn','timeline','cameraPreview','showCamerasBtn','kpiIncidents','kpiDetours','kpiHigh','kpiWeather','ticker',
     'mapContextMenu','contextCreateEventBtn','contextCenterBtn','manualEventModal','closeModalBtn','cancelModalBtn','manualEventForm','useMapCenterBtn','cameraModal','closeCameraModalBtn','cameraModalList','toastStack'
@@ -580,6 +594,9 @@ function bindEvents() {
   els.filterRow.addEventListener('click', e => { const btn = e.target.closest('[data-filter]'); if (!btn) return; state.filter = btn.dataset.filter; els.filterRow.querySelectorAll('.filter').forEach(b => b.classList.toggle('active', b === btn)); renderQueue(); });
   document.querySelectorAll('[data-layer]').forEach(input => input.addEventListener('change', () => { state.layersEnabled[input.dataset.layer] = input.checked; syncLayerVisibility(); }));
   els.refreshBtn.addEventListener('click', () => refreshData()); els.fitEventsBtn.addEventListener('click', fitEvents);
+  els.layersToggleBtn.addEventListener('click', e => { e.stopPropagation(); toggleLayersPanel(); });
+  els.closeLayersBtn.addEventListener('click', e => { e.stopPropagation(); setLayersPanel(false); });
+  els.layerBox.addEventListener('click', e => e.stopPropagation());
   els.openQuickCreateBtn.addEventListener('click', () => openManualModal()); els.newEventBtn.addEventListener('click', () => openManualModal());
   els.closeDrawerBtn.addEventListener('click', closeDrawer); els.detailTabs.addEventListener('click', e => { const btn = e.target.closest('[data-tab]'); if (btn) switchDetailTab(btn.dataset.tab); });
   els.primaryWorkflowBtn.addEventListener('click', advancePrimaryWorkflow); els.undoStatusBtn.addEventListener('click', () => { if (state.selectedId) undoLastStatusForEvent(state.selectedId); });
@@ -595,7 +612,7 @@ function bindEvents() {
   els.useMapCenterBtn.addEventListener('click', () => { if (!mapReady || !map) return; const c = map.getCenter(); els.manualEventForm.elements.lat.value = c.lat.toFixed(6); els.manualEventForm.elements.lon.value = c.lng.toFixed(6); });
   els.manualEventForm.addEventListener('submit', e => { e.preventDefault(); createManualEvent(new FormData(e.currentTarget)); e.currentTarget.reset(); });
   els.closeCameraModalBtn.addEventListener('click', closeCameraModal); els.cameraModal.addEventListener('click', e => { if (e.target === els.cameraModal) closeCameraModal(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeDrawer(); closeManualModal(); closeCameraModal(); closeMapContextMenu(); } });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeDrawer(); closeManualModal(); closeCameraModal(); closeMapContextMenu(); setLayersPanel(false); } });
 }
 
 async function init() {

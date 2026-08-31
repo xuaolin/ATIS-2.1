@@ -5,11 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Calgary TMC — Traffic Event Management</title>
   <meta name="description" content="Browser-based TMC traffic event management prototype using public Calgary traffic data." />
- <link rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-      crossorigin="" />
-  <link rel="stylesheet" href="styles-phase1.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="styles-phase1.css?v=layer-ui-20260830-1" />
 </head>
 <body>
   <div id="appShell">
@@ -75,6 +72,7 @@
             <strong>CALGARY LIVE MAP</strong>
           </div>
           <div class="map-toolbar-actions">
+            <button class="btn layers-toggle-btn" id="layersToggleBtn" aria-expanded="false" aria-controls="layerBox">LAYERS</button>
             <button class="btn" id="fitEventsBtn">FIT EVENTS</button>
             <button class="btn" id="refreshBtn">REFRESH</button>
           </div>
@@ -84,13 +82,16 @@
 
         <div class="map-hint" id="mapHint">Right-click the map to create an event at that location.</div>
 
-        <div class="layer-box">
+        <div class="layer-box is-collapsed" id="layerBox" aria-hidden="true">
           <div class="layer-title-row">
             <div>
               <div class="layer-title">LIVE MAP LAYERS</div>
               <div class="layer-subtitle">Leaflet · OpenStreetMap · Calgary operations</div>
             </div>
-            <span class="live-pill">LIVE</span>
+            <div class="layer-title-actions">
+              <span class="live-pill">LIVE</span>
+              <button class="layer-close-btn" id="closeLayersBtn" type="button" aria-label="Close map layers">×</button>
+            </div>
           </div>
 
           <div class="layer-row traffic-row basemap-row">
@@ -293,6 +294,6 @@
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script src="app-phase1.js"></script>
+  <script src="app-phase1.js?v=layer-ui-20260830-1"></script>
 </body>
 </html>
