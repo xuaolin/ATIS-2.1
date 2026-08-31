@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Calgary TMC — Traffic Event Management</title>
   <meta name="description" content="Browser-based TMC traffic event management prototype using public Calgary traffic data." />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles-phase1.css" />
 </head>
 <body>
   <div id="appShell">
@@ -24,6 +24,7 @@
       </div>
 
       <div class="topbar-right">
+        <button class="topbar-action" id="openQuickCreateBtn" title="Create a new event">+ EVENT</button>
         <div class="system-health" id="systemHealth"><span class="health-dot"></span><span id="healthText">CONNECTING</span></div>
         <div class="clock-block">
           <div id="clock">--:--:--</div>
@@ -39,11 +40,14 @@
             <div class="panel-kicker">OPERATIONS</div>
             <h2>EVENT QUEUE</h2>
           </div>
-          <button class="btn btn-accent" id="newEventBtn">+ NEW EVENT</button>
+          <button class="icon-action" id="newEventBtn" title="Create event" aria-label="Create event">+</button>
         </div>
 
         <div class="queue-tools">
-          <input id="eventSearch" type="search" placeholder="Search location / description" autocomplete="off" />
+          <div class="search-wrap">
+            <span class="search-icon" aria-hidden="true">⌕</span>
+            <input id="eventSearch" type="search" placeholder="Search location, description or ID" autocomplete="off" />
+          </div>
           <div class="filter-row" id="filterRow">
             <button class="filter active" data-filter="ALL">ALL</button>
             <button class="filter" data-filter="INCIDENT">INCIDENT</button>
@@ -68,10 +72,13 @@
           </div>
           <div class="map-toolbar-actions">
             <button class="btn" id="fitEventsBtn">FIT EVENTS</button>
-            <button class="btn" id="refreshBtn">REFRESH DATA</button>
+            <button class="btn" id="refreshBtn">REFRESH</button>
           </div>
         </div>
+
         <div id="map"></div>
+
+        <div class="map-hint" id="mapHint">Right-click the map to create an event at that location.</div>
 
         <div class="layer-box">
           <div class="layer-title-row">
@@ -83,49 +90,32 @@
           </div>
 
           <label class="layer-row traffic-row">
-            <span class="layer-icon traffic-icon" aria-hidden="true">
-              <svg viewBox="0 0 30 18"><path d="M2 9h6"/><path d="M10 9h6"/><path d="M18 9h5"/><path d="M25 9h3"/></svg>
-            </span>
+            <span class="layer-symbol traffic-symbol">≋</span>
             <span class="layer-copy"><strong>Traffic flow</strong><small>Google live congestion</small></span>
             <span class="switch"><input type="checkbox" data-layer="TRAFFIC" checked /><span></span></span>
           </label>
-
           <label class="layer-row">
-            <span class="layer-icon incident-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7.8v5.6"/><circle cx="12" cy="16.8" r=".8"/></svg>
-            </span>
+            <span class="layer-symbol incident-symbol">!</span>
             <span class="layer-copy"><strong>Incidents</strong><small>Current traffic events</small></span>
             <span class="switch"><input type="checkbox" data-layer="INCIDENT" checked /><span></span></span>
           </label>
-
           <label class="layer-row">
-            <span class="layer-icon detour-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M5 18c0-6 3-9 8-9h5"/><path d="M15 6l3 3-3 3"/><circle cx="5" cy="18" r="1.5"/></svg>
-            </span>
+            <span class="layer-symbol detour-symbol">↪</span>
             <span class="layer-copy"><strong>Detours</strong><small>Active / upcoming</small></span>
             <span class="switch"><input type="checkbox" data-layer="DETOUR" checked /><span></span></span>
           </label>
-
           <label class="layer-row">
-            <span class="layer-icon manual-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>
-            </span>
+            <span class="layer-symbol manual-symbol">+</span>
             <span class="layer-copy"><strong>Manual TMC</strong><small>Operator-created events</small></span>
             <span class="switch"><input type="checkbox" data-layer="MANUAL" checked /><span></span></span>
           </label>
-
           <label class="layer-row">
-            <span class="layer-icon camera-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M4 8.5h3l1.6-2h6.8l1.6 2h3v9H4z"/><circle cx="12" cy="13" r="3"/></svg>
-            </span>
+            <span class="layer-symbol camera-symbol">●</span>
             <span class="layer-copy"><strong>Cameras</strong><small>Traffic camera locations</small></span>
             <span class="switch"><input type="checkbox" data-layer="CAMERA" /><span></span></span>
           </label>
-
           <label class="layer-row">
-            <span class="layer-icon weather-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M7 16.5h9.5a3.5 3.5 0 0 0 .4-7A5.2 5.2 0 0 0 7 8.3 4.1 4.1 0 0 0 7 16.5z"/><path d="M12 17.5l-1.4 2.2h2l-1 1.8"/></svg>
-            </span>
+            <span class="layer-symbol weather-symbol">☁</span>
             <span class="layer-copy"><strong>Weather alerts</strong><small>ECCC alert polygons</small></span>
             <span class="switch"><input type="checkbox" data-layer="WEATHER" checked /><span></span></span>
           </label>
@@ -134,68 +124,105 @@
         <div class="map-status" id="mapStatus">Loading public feeds…</div>
       </section>
 
-      <aside class="panel details-panel">
-        <div id="emptyDetail" class="empty-detail">
-          <div class="empty-icon">+</div>
-          <h2>SELECT AN EVENT</h2>
-          <p>Choose an item from the queue or a marker on the map to open the operator workspace.</p>
-        </div>
-
-        <div id="eventDetail" class="event-detail hidden">
-          <div class="detail-head">
+      <aside class="event-drawer" id="eventDrawer" aria-hidden="true">
+        <div class="drawer-shell">
+          <div class="drawer-head">
             <div>
               <div class="panel-kicker" id="detailSource">SOURCE</div>
               <h2 id="detailTitle">Event</h2>
+              <div class="drawer-subline">
+                <span class="priority-badge" id="detailPriority">MEDIUM</span>
+                <span class="status-chip drawer-status" id="detailStatus">NEW</span>
+              </div>
             </div>
-            <span class="priority-badge" id="detailPriority">MEDIUM</span>
+            <button class="icon-action subtle" id="closeDrawerBtn" aria-label="Close event details">×</button>
           </div>
 
-          <div class="detail-meta-grid">
-            <div><span>ID</span><strong id="detailId">—</strong></div>
-            <div><span>TYPE</span><strong id="detailType">—</strong></div>
-            <div><span>START</span><strong id="detailStart">—</strong></div>
-            <div><span>UPDATED</span><strong id="detailUpdated">—</strong></div>
+          <div class="drawer-commandbar" id="drawerCommandbar">
+            <button class="command-btn primary" id="primaryWorkflowBtn">REVIEW EVENT</button>
+            <button class="command-btn" id="cameraCommandBtn">CAMERAS</button>
+            <button class="command-btn" id="moreActionsBtn">ACTIONS</button>
           </div>
 
-          <div class="detail-section">
-            <div class="section-title">DESCRIPTION</div>
-            <p id="detailDescription" class="event-description"></p>
-          </div>
+          <nav class="detail-tabs" id="detailTabs" aria-label="Event detail tabs">
+            <button class="detail-tab active" data-tab="overview">OVERVIEW</button>
+            <button class="detail-tab" data-tab="actions">ACTIONS</button>
+            <button class="detail-tab" data-tab="notes">NOTES</button>
+            <button class="detail-tab" data-tab="activity">ACTIVITY</button>
+          </nav>
 
-          <div class="detail-section status-section">
-            <div class="section-title">TMC WORKFLOW STATUS</div>
-            <div id="statusRail" class="status-rail"></div>
-            <div class="status-controls">
-              <button class="btn" id="previousStatusBtn">◀ PREVIOUS</button>
-              <button class="btn btn-accent" id="nextStatusBtn">NEXT STATUS ▶</button>
-            </div>
-          </div>
+          <div class="drawer-body">
+            <section class="tab-panel active" data-tab-panel="overview">
+              <div class="detail-meta-grid">
+                <div><span>ID</span><strong id="detailId">—</strong></div>
+                <div><span>TYPE</span><strong id="detailType">—</strong></div>
+                <div><span>START</span><strong id="detailStart">—</strong></div>
+                <div><span>UPDATED</span><strong id="detailUpdated">—</strong></div>
+              </div>
 
-          <div class="detail-section">
-            <div class="section-title">OPERATOR ACTIONS</div>
-            <div class="action-grid" id="actionGrid">
-              <label><input type="checkbox" data-action="verified" /> Event verified</label>
-              <label><input type="checkbox" data-action="cameraChecked" /> Camera checked</label>
-              <label><input type="checkbox" data-action="signalReviewed" /> Signal timing reviewed</label>
-              <label><input type="checkbox" data-action="dmsActivated" /> DMS action recorded</label>
-              <label><input type="checkbox" data-action="detourRequired" /> Detour required</label>
-              <label><input type="checkbox" data-action="publicUpdate" /> Public update recorded</label>
-            </div>
-          </div>
+              <div class="detail-section compact">
+                <div class="section-title">DESCRIPTION</div>
+                <p id="detailDescription" class="event-description"></p>
+              </div>
 
-          <div class="detail-section">
-            <div class="section-title">OPERATOR NOTE</div>
-            <textarea id="noteInput" rows="3" placeholder="Add an operational note…"></textarea>
-            <div class="inline-actions">
-              <button class="btn btn-accent" id="addNoteBtn">ADD NOTE</button>
-              <button class="btn" id="nearestCameraBtn">NEAREST CAMERA</button>
-              <button class="btn" id="exportEventBtn">EXPORT JSON</button>
-            </div>
-          </div>
+              <div class="detail-section compact">
+                <div class="section-title-row">
+                  <div class="section-title">WORKFLOW</div>
+                  <button class="text-btn" id="undoStatusBtn" disabled>UNDO LAST</button>
+                </div>
+                <div id="statusRail" class="status-rail"></div>
+              </div>
 
-          <div class="detail-section timeline-section">
-            <div class="section-title">ACTIVITY TIMELINE</div>
-            <div id="timeline" class="timeline"></div>
+              <div class="detail-section compact">
+                <div class="section-title-row">
+                  <div class="section-title">NEARBY CAMERAS</div>
+                  <button class="text-btn" id="showCamerasBtn">VIEW ALL</button>
+                </div>
+                <div id="cameraPreview" class="camera-preview"></div>
+              </div>
+            </section>
+
+            <section class="tab-panel" data-tab-panel="actions">
+              <div class="detail-section no-top">
+                <div class="section-title">OPERATOR ACTIONS</div>
+                <div class="action-card-grid" id="actionGrid">
+                  <button class="action-card" data-action="verified"><span class="action-icon">✓</span><span><strong>Verify event</strong><small>Confirm event information</small></span><span class="action-state">OFF</span></button>
+                  <button class="action-card" data-action="cameraChecked"><span class="action-icon">◉</span><span><strong>Camera checked</strong><small>Record visual verification</small></span><span class="action-state">OFF</span></button>
+                  <button class="action-card" data-action="signalReviewed"><span class="action-icon">S</span><span><strong>Signal review</strong><small>Review timing response</small></span><span class="action-state">OFF</span></button>
+                  <button class="action-card" data-action="dmsActivated"><span class="action-icon">D</span><span><strong>DMS action</strong><small>Record message sign action</small></span><span class="action-state">OFF</span></button>
+                  <button class="action-card" data-action="detourRequired"><span class="action-icon">↪</span><span><strong>Detour required</strong><small>Flag detour coordination</small></span><span class="action-state">OFF</span></button>
+                  <button class="action-card" data-action="publicUpdate"><span class="action-icon">P</span><span><strong>Public update</strong><small>Record traveller information action</small></span><span class="action-state">OFF</span></button>
+                </div>
+              </div>
+
+              <div class="detail-section">
+                <div class="section-title">TOOLS</div>
+                <div class="tool-grid">
+                  <button class="btn" id="nearestCameraBtn">NEARBY CAMERAS</button>
+                  <button class="btn" id="exportEventBtn">EXPORT JSON</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="tab-panel" data-tab-panel="notes">
+              <div class="detail-section no-top">
+                <div class="section-title">OPERATOR NOTE</div>
+                <textarea id="noteInput" rows="5" placeholder="Add an operational note…"></textarea>
+                <div class="note-help">Tip: Ctrl/Cmd + Enter saves the note.</div>
+                <button class="btn btn-accent full-width" id="addNoteBtn">ADD NOTE</button>
+              </div>
+              <div class="detail-section">
+                <div class="section-title">RECENT NOTES</div>
+                <div id="notesList" class="notes-list"></div>
+              </div>
+            </section>
+
+            <section class="tab-panel" data-tab-panel="activity">
+              <div class="detail-section no-top timeline-section">
+                <div class="section-title">ACTIVITY TIMELINE</div>
+                <div id="timeline" class="timeline"></div>
+              </div>
+            </section>
           </div>
         </div>
       </aside>
@@ -213,6 +240,11 @@
     </footer>
   </div>
 
+  <div class="map-context-menu hidden" id="mapContextMenu">
+    <button id="contextCreateEventBtn"><strong>+ Create event here</strong><span>Use this map location</span></button>
+    <button id="contextCenterBtn"><strong>Center map here</strong><span>Move the operating picture</span></button>
+  </div>
+
   <div class="modal-backdrop hidden" id="manualEventModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal">
       <div class="modal-head">
@@ -220,7 +252,7 @@
           <div class="panel-kicker">TMC INTERNAL RECORD</div>
           <h2 id="modalTitle">CREATE MANUAL EVENT</h2>
         </div>
-        <button class="icon-btn" id="closeModalBtn" aria-label="Close">×</button>
+        <button class="icon-action subtle" id="closeModalBtn" aria-label="Close">×</button>
       </div>
       <form id="manualEventForm">
         <label>Event title<input name="title" required placeholder="e.g. Signal outage — Macleod Tr / 5 Av SE" /></label>
@@ -241,6 +273,21 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <div class="modal-backdrop hidden" id="cameraModal" role="dialog" aria-modal="true" aria-labelledby="cameraModalTitle">
+    <div class="modal camera-modal">
+      <div class="modal-head">
+        <div>
+          <div class="panel-kicker">EVENT SUPPORT</div>
+          <h2 id="cameraModalTitle">NEARBY TRAFFIC CAMERAS</h2>
+        </div>
+        <button class="icon-action subtle" id="closeCameraModalBtn" aria-label="Close">×</button>
+      </div>
+      <div id="cameraModalList" class="camera-modal-list"></div>
+    </div>
+  </div>
+
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+  <script src="app-phase1.js"></script>
 </body>
 </html>
