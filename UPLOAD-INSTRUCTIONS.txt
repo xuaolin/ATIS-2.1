@@ -1,0 +1,15 @@
+ATIS-2.1 Phase 1 — OpenStreetMap version
+
+Replace these files in the repository root:
+- index.html
+- app-phase1.js
+- styles-phase1.css
+
+Changes:
+- Google Maps dependency removed.
+- Leaflet 1.9.4 + OpenStreetMap standard basemap added.
+- No API key required.
+- Incident, detour, manual event, camera, weather, event drawer, quick actions, right-click event creation, nearby cameras and workflow interactions retained.
+- Google live traffic layer is not available in this key-free version.
+
+For GitHub Pages, upload/replace the three files and wait for deployment.

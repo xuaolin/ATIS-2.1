@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Calgary TMC — Traffic Event Management</title>
   <meta name="description" content="Browser-based TMC traffic event management prototype using public Calgary traffic data." />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQ3ynTzFQX1A26Qus9Wru3JpMZ0R0aM=" crossorigin="" />
   <link rel="stylesheet" href="styles-phase1.css" />
 </head>
 <body>
@@ -84,16 +85,16 @@
           <div class="layer-title-row">
             <div>
               <div class="layer-title">LIVE MAP LAYERS</div>
-              <div class="layer-subtitle">Google Maps · Calgary operations</div>
+              <div class="layer-subtitle">Leaflet · OpenStreetMap · Calgary operations</div>
             </div>
             <span class="live-pill">LIVE</span>
           </div>
 
-          <label class="layer-row traffic-row">
-            <span class="layer-symbol traffic-symbol">≋</span>
-            <span class="layer-copy"><strong>Traffic flow</strong><small>Google live congestion</small></span>
-            <span class="switch"><input type="checkbox" data-layer="TRAFFIC" checked /><span></span></span>
-          </label>
+          <div class="layer-row traffic-row basemap-row">
+            <span class="layer-symbol traffic-symbol">⌖</span>
+            <span class="layer-copy"><strong>Street basemap</strong><small>OpenStreetMap · no API key</small></span>
+            <span class="source-pill">OSM</span>
+          </div>
           <label class="layer-row">
             <span class="layer-symbol incident-symbol">!</span>
             <span class="layer-copy"><strong>Incidents</strong><small>Current traffic events</small></span>
@@ -288,6 +289,7 @@
 
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="app-phase1.js"></script>
 </body>
 </html>

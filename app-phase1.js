@@ -1,8 +1,7 @@
-/* Calgary TMC Traffic Event Management — Phase 1 UX & interaction upgrade */
+/* Calgary TMC Traffic Event Management — Phase 1 UX + Leaflet/OpenStreetMap */
 
 const CONFIG = {
-  // Google Maps JavaScript API key. Restrict this key to your GitHub Pages domain and Maps JavaScript API.
-  googleMapsApiKey: 'PASTE_YOUR_GOOGLE_MAPS_API_KEY_HERE',
+  // No map API key required. Basemap uses OpenStreetMap standard tiles through Leaflet.
   calgaryCenter: [51.0447, -114.0719],
   calgaryBounds: [[50.75, -114.45], [51.35, -113.65]],
   refreshMs: 5 * 60 * 1000,
@@ -49,16 +48,15 @@ const state = {
   activeTab: 'overview',
   feedErrors: [],
   markersByEventId: new Map(),
-  layersEnabled: { TRAFFIC: true, INCIDENT: true, DETOUR: true, MANUAL: true, CAMERA: false, WEATHER: true },
+  layersEnabled: { INCIDENT: true, DETOUR: true, MANUAL: true, CAMERA: false, WEATHER: true },
   mapContextLatLng: null,
   undoStack: []
 };
 
 const els = {};
 let map;
-let trafficLayer;
+let baseMapLayer;
 let weatherDataLayer;
-let infoWindow;
 let layers = {};
 let mapReady = false;
 
@@ -169,7 +167,7 @@ async function refreshData({ silent = false } = {}) {
   renderAll();
   els.lastRefresh.textContent = `REFRESH ${formatTime(new Date())}`;
   updateHealth();
-  setMapStatus(state.feedErrors.length ? `DEGRADED · ${state.feedErrors.join(' · ')}` : 'LIVE · Google Traffic + Calgary Open Data + ECCC');
+  setMapStatus(state.feedErrors.length ? `DEGRADED · ${state.feedErrors.join(' · ')}` : 'LIVE · OpenStreetMap + Calgary Open Data + ECCC');
   if (!silent) toast('Public feeds refreshed', `${state.allEvents.length} event records available.`);
 }
 
@@ -189,104 +187,177 @@ function updateHealth() {
 }
 function setMapStatus(text) { els.mapStatus.textContent = text; }
 
-async function loadGoogleMapsApi() {
-  if (window.google?.maps) return;
-  const key = String(CONFIG.googleMapsApiKey || '').trim();
-  if (!key || key.includes('PASTE_YOUR')) throw new Error('GOOGLE_MAPS_API_KEY_REQUIRED');
-  await new Promise((resolve, reject) => {
-    const existing = document.querySelector('script[data-google-maps-loader]');
-    if (existing) { existing.addEventListener('load', resolve, { once: true }); existing.addEventListener('error', () => reject(new Error('Google Maps failed to load')), { once: true }); return; }
-    const script = document.createElement('script');
-    script.dataset.googleMapsLoader = 'true'; script.async = true; script.defer = true;
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&v=weekly&loading=async`;
-    script.onload = resolve; script.onerror = () => reject(new Error('Google Maps failed to load')); document.head.appendChild(script);
-  });
-}
-
-async function initMap() {
-  try { await loadGoogleMapsApi(); }
-  catch {
+function initMap() {
+  if (!window.L) {
     mapReady = false;
-    document.getElementById('map').innerHTML = `<div class="map-key-required"><div class="map-key-icon">G</div><strong>GOOGLE MAPS API KEY REQUIRED</strong><span>Add your key at the top of <code>app-phase1.js</code>, then refresh.</span></div>`;
-    setMapStatus('MAP OFFLINE · Google Maps API key required');
+    document.getElementById('map').innerHTML = `<div class="map-key-required"><div class="map-key-icon osm-icon">M</div><strong>MAP LIBRARY DID NOT LOAD</strong><span>Check your internet connection and refresh the page.</span></div>`;
+    setMapStatus('MAP OFFLINE · Leaflet library unavailable');
     return;
   }
-  map = new google.maps.Map(document.getElementById('map'), { center: { lat: CONFIG.calgaryCenter[0], lng: CONFIG.calgaryCenter[1] }, zoom: 11, mapTypeId: 'roadmap', disableDefaultUI: true, zoomControl: true, scaleControl: true, gestureHandling: 'greedy', clickableIcons: false, backgroundColor: '#e9ecef' });
-  infoWindow = new google.maps.InfoWindow({ disableAutoPan: false });
-  trafficLayer = new google.maps.TrafficLayer();
-  weatherDataLayer = new google.maps.Data();
-  weatherDataLayer.setStyle({ strokeColor: '#2385d9', strokeOpacity: .92, strokeWeight: 2, fillColor: '#2385d9', fillOpacity: .08 });
-  weatherDataLayer.addListener('click', ev => {
-    const props = {}; ev.feature.forEachProperty((value, key) => { props[key] = value; });
-    const name = props.alert_name_en || props.alert_short_name_en || 'Weather alert'; const area = props.feature_name_en || '';
-    infoWindow.setContent(`<div class="gm-popup"><div class="popup-kicker">ECCC WEATHER ALERT</div><div class="popup-title">${escapeHtml(name)}</div><div>${escapeHtml(area)}</div></div>`);
-    infoWindow.setPosition(ev.latLng); infoWindow.open({ map });
+
+  map = L.map('map', {
+    center: CONFIG.calgaryCenter,
+    zoom: 11,
+    zoomControl: true,
+    attributionControl: true,
+    preferCanvas: true
   });
-  map.addListener('rightclick', ev => openMapContextMenu(ev.domEvent, ev.latLng));
-  map.addListener('click', () => closeMapContextMenu());
-  layers = { INCIDENT: [], DETOUR: [], MANUAL: [], CAMERA: [] };
-  mapReady = true; syncLayerVisibility();
+
+  baseMapLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  layers = {
+    INCIDENT: L.layerGroup(),
+    DETOUR: L.layerGroup(),
+    MANUAL: L.layerGroup(),
+    CAMERA: L.layerGroup()
+  };
+
+  weatherDataLayer = L.geoJSON(null, {
+    style: {
+      color: '#2385d9',
+      weight: 2,
+      opacity: 0.92,
+      fillColor: '#2385d9',
+      fillOpacity: 0.08
+    },
+    onEachFeature: (feature, layer) => {
+      const props = feature?.properties || {};
+      const name = props.alert_name_en || props.alert_short_name_en || 'Weather alert';
+      const area = props.feature_name_en || '';
+      layer.bindPopup(`<div class="gm-popup"><div class="popup-kicker">ECCC WEATHER ALERT</div><div class="popup-title">${escapeHtml(name)}</div><div>${escapeHtml(area)}</div></div>`);
+    }
+  });
+
+  map.on('contextmenu', ev => openMapContextMenu(ev.originalEvent, ev.latlng));
+  map.on('click', () => closeMapContextMenu());
+
+  mapReady = true;
+  syncLayerVisibility();
+  setMapStatus('MAP ONLINE · OpenStreetMap');
 }
 
-function markerSvg(type) {
-  const styles = { INCIDENT: { fill: '#d82f43', stroke: '#fff', glyph: '!' }, DETOUR: { fill: '#e6a23c', stroke: '#fff', glyph: '↪' }, MANUAL: { fill: '#35bce8', stroke: '#fff', glyph: '+' }, CAMERA: { fill: '#526779', stroke: '#fff', glyph: '●' } };
-  const s = styles[type] || styles.MANUAL; const size = type === 'CAMERA' ? 22 : 30; const fontSize = type === 'CAMERA' ? 8 : 14;
+function markerIcon(type) {
+  const styles = {
+    INCIDENT: { fill: '#d82f43', stroke: '#fff', glyph: '!' },
+    DETOUR: { fill: '#e6a23c', stroke: '#fff', glyph: '↪' },
+    MANUAL: { fill: '#35bce8', stroke: '#fff', glyph: '+' },
+    CAMERA: { fill: '#526779', stroke: '#fff', glyph: '●' }
+  };
+  const s = styles[type] || styles.MANUAL;
+  const size = type === 'CAMERA' ? 24 : 32;
+  const fontSize = type === 'CAMERA' ? 8 : 14;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 32 32"><circle cx="16" cy="16" r="11" fill="${s.fill}" stroke="${s.stroke}" stroke-width="2"/><circle cx="16" cy="16" r="14" fill="none" stroke="rgba(0,0,0,.18)" stroke-width="2"/><text x="16" y="21" text-anchor="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="700" fill="#fff">${s.glyph}</text></svg>`;
-  return { url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`, scaledSize: new google.maps.Size(size, size), anchor: new google.maps.Point(size/2, size/2) };
+  return L.divIcon({
+    className: 'tmc-leaflet-marker',
+    html: svg,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    popupAnchor: [0, -(size / 2)]
+  });
 }
-function clearGoogleMarkers() {
-  Object.values(layers).forEach(items => { if (!Array.isArray(items)) return; items.forEach(marker => marker.setMap(null)); items.length = 0; });
+
+function clearMapLayers() {
+  Object.values(layers).forEach(layerGroup => layerGroup?.clearLayers?.());
   state.markersByEventId.clear();
-  if (weatherDataLayer) { const features = []; weatherDataLayer.forEach(feature => features.push(feature)); features.forEach(feature => weatherDataLayer.remove(feature)); }
+  weatherDataLayer?.clearLayers?.();
 }
+
 function renderMap() {
   if (!mapReady || !map) return;
-  clearGoogleMarkers();
+  clearMapLayers();
+
   state.allEvents.forEach(event => {
     if (!event.coords || !layers[event.type]) return;
-    const marker = new google.maps.Marker({ position: { lat: event.coords[0], lng: event.coords[1] }, map: state.layersEnabled[event.type] ? map : null, icon: markerSvg(event.type), title: event.title, optimized: true, zIndex: event.priority === 'HIGH' ? 30 : event.priority === 'MEDIUM' ? 20 : 10 });
-    marker.addListener('click', () => {
-      const op = operatorFor(event.id);
-      infoWindow.setContent(`<div class="gm-popup"><div class="popup-kicker">${escapeHtml(event.type)} · ${escapeHtml(op.status)}</div><div class="popup-title">${escapeHtml(event.title)}</div><div>${escapeHtml(event.description).slice(0,180)}</div><div class="popup-actions"><button data-map-action="open" data-id="${escapeHtml(event.id)}">OPEN</button><button data-map-action="camera" data-id="${escapeHtml(event.id)}">CAMERAS</button><button data-map-action="verify" data-id="${escapeHtml(event.id)}">VERIFY</button></div></div>`);
-      infoWindow.open({ map, anchor: marker }); selectEvent(event.id, false);
-      google.maps.event.addListenerOnce(infoWindow, 'domready', bindPopupActions);
+    const marker = L.marker(event.coords, {
+      icon: markerIcon(event.type),
+      title: event.title,
+      riseOnHover: true
     });
-    layers[event.type].push(marker); state.markersByEventId.set(event.id, marker);
+
+    const op = operatorFor(event.id);
+    marker.bindPopup(`<div class="gm-popup"><div class="popup-kicker">${escapeHtml(event.type)} · ${escapeHtml(op.status)}</div><div class="popup-title">${escapeHtml(event.title)}</div><div>${escapeHtml(event.description).slice(0,180)}</div><div class="popup-actions"><button data-map-action="open" data-id="${escapeHtml(event.id)}">OPEN</button><button data-map-action="camera" data-id="${escapeHtml(event.id)}">CAMERAS</button><button data-map-action="verify" data-id="${escapeHtml(event.id)}">VERIFY</button></div></div>`);
+
+    marker.on('click', () => selectEvent(event.id, false));
+    marker.on('popupopen', bindPopupActions);
+    marker.addTo(layers[event.type]);
+
+    state.markersByEventId.set(event.id, marker);
   });
+
   state.cameras.forEach(cam => {
-    const marker = new google.maps.Marker({ position: { lat: cam.coords[0], lng: cam.coords[1] }, map: state.layersEnabled.CAMERA ? map : null, icon: markerSvg('CAMERA'), title: cam.title, optimized: true, zIndex: 5 });
-    marker.addListener('click', () => {
-      const safeUrl = cam.url ? escapeHtml(cam.url) : '';
-      infoWindow.setContent(`<div class="gm-popup"><div class="popup-kicker">TRAFFIC CAMERA</div><div class="popup-title">${escapeHtml(cam.title)}</div>${safeUrl ? `<a href="${safeUrl}" target="_blank" rel="noopener">Open camera</a>` : ''}</div>`); infoWindow.open({ map, anchor: marker });
-    }); layers.CAMERA.push(marker);
+    const marker = L.marker(cam.coords, {
+      icon: markerIcon('CAMERA'),
+      title: cam.title,
+      riseOnHover: true
+    });
+    const safeUrl = cam.url ? escapeHtml(cam.url) : '';
+    marker.bindPopup(`<div class="gm-popup"><div class="popup-kicker">TRAFFIC CAMERA</div><div class="popup-title">${escapeHtml(cam.title)}</div>${safeUrl ? `<a href="${safeUrl}" target="_blank" rel="noopener">Open camera</a>` : ''}</div>`);
+    marker.addTo(layers.CAMERA);
   });
-  if (state.weather.length) { try { weatherDataLayer.addGeoJson({ type: 'FeatureCollection', features: state.weather }); } catch {} }
+
+  if (state.weather.length) {
+    try {
+      weatherDataLayer.addData({ type: 'FeatureCollection', features: state.weather });
+    } catch {}
+  }
+
   syncLayerVisibility();
 }
+
 function bindPopupActions() {
-  document.querySelectorAll('[data-map-action]').forEach(btn => btn.addEventListener('click', () => {
-    const id = btn.dataset.id; const action = btn.dataset.mapAction; selectEvent(id, false);
-    if (action === 'camera') showCameraModal();
-    if (action === 'verify') setStatusForEvent(id, 'VERIFIED', { announce: true });
-  }));
+  document.querySelectorAll('[data-map-action]').forEach(btn => {
+    if (btn.dataset.bound === '1') return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.id;
+      const action = btn.dataset.mapAction;
+      selectEvent(id, false);
+      if (action === 'camera') showCameraModal();
+      if (action === 'verify') setStatusForEvent(id, 'VERIFIED', { announce: true });
+    });
+  });
 }
+
 function syncLayerVisibility() {
   if (!mapReady || !map) return;
-  if (trafficLayer) trafficLayer.setMap(state.layersEnabled.TRAFFIC ? map : null);
-  ['INCIDENT','DETOUR','MANUAL','CAMERA'].forEach(name => (layers[name] || []).forEach(marker => marker.setMap(state.layersEnabled[name] ? map : null)));
-  if (weatherDataLayer) weatherDataLayer.setMap(state.layersEnabled.WEATHER ? map : null);
+
+  ['INCIDENT','DETOUR','MANUAL','CAMERA'].forEach(name => {
+    const group = layers[name];
+    if (!group) return;
+    if (state.layersEnabled[name]) {
+      if (!map.hasLayer(group)) group.addTo(map);
+    } else if (map.hasLayer(group)) {
+      map.removeLayer(group);
+    }
+  });
+
+  if (weatherDataLayer) {
+    if (state.layersEnabled.WEATHER) {
+      if (!map.hasLayer(weatherDataLayer)) weatherDataLayer.addTo(map);
+    } else if (map.hasLayer(weatherDataLayer)) {
+      map.removeLayer(weatherDataLayer);
+    }
+  }
 }
 
 function openMapContextMenu(domEvent, latLng) {
   state.mapContextLatLng = latLng;
   const x = Math.min(window.innerWidth - 205, Math.max(8, domEvent?.clientX ?? window.innerWidth/2));
   const y = Math.min(window.innerHeight - 120, Math.max(8, domEvent?.clientY ?? window.innerHeight/2));
-  els.mapContextMenu.style.left = `${x}px`; els.mapContextMenu.style.top = `${y}px`; els.mapContextMenu.classList.remove('hidden');
+  els.mapContextMenu.style.left = `${x}px`;
+  els.mapContextMenu.style.top = `${y}px`;
+  els.mapContextMenu.classList.remove('hidden');
 }
+
 function closeMapContextMenu() { els.mapContextMenu.classList.add('hidden'); }
+
 function createEventAtContextLocation() {
   if (!state.mapContextLatLng) return;
-  openManualModal({ lat: state.mapContextLatLng.lat(), lon: state.mapContextLatLng.lng() }); closeMapContextMenu();
+  openManualModal({ lat: state.mapContextLatLng.lat, lon: state.mapContextLatLng.lng });
+  closeMapContextMenu();
 }
 
 function filteredEvents() {
@@ -315,7 +386,7 @@ function handleQuickAction(id, action) {
 function selectEvent(id, pan = true) {
   const event = state.allEvents.find(e => e.id === id); if (!event) return;
   state.selectedId = id; operatorFor(id); renderQueue(); renderDetail(); openDrawer();
-  if (pan && event.coords && mapReady) { map.panTo({ lat: event.coords[0], lng: event.coords[1] }); if ((map.getZoom() || 0) < 14) map.setZoom(14); }
+  if (pan && event.coords && mapReady) { map.panTo(event.coords); if ((map.getZoom() || 0) < 14) map.setZoom(14); }
 }
 function openDrawer() { els.eventDrawer.classList.add('open'); els.eventDrawer.setAttribute('aria-hidden', 'false'); }
 function closeDrawer() { els.eventDrawer.classList.remove('open'); els.eventDrawer.setAttribute('aria-hidden', 'true'); }
@@ -386,7 +457,7 @@ function renderCameraPreview(event) {
 }
 function focusCamera(cam) {
   if (!cam) return;
-  if (mapReady) { map.panTo({ lat: cam.coords[0], lng: cam.coords[1] }); map.setZoom(16); }
+  if (mapReady) { map.panTo(cam.coords); map.setZoom(16); }
   const event = state.allEvents.find(e => e.id === state.selectedId); if (event) { operatorFor(event.id).actions.cameraChecked = true; addTimeline(event.id, `Camera viewed: ${cam.title}`); renderDetail(); }
   if (cam.url) window.open(cam.url, '_blank', 'noopener');
 }
@@ -394,7 +465,7 @@ function showCameraModal() {
   const event = state.allEvents.find(e => e.id === state.selectedId); if (!event) return;
   const cameras = nearbyCameras(event, 8);
   els.cameraModalList.innerHTML = cameras.length ? cameras.map((cam, idx) => `<div class="camera-modal-item"><span><strong>${escapeHtml(cam.title)}</strong><small>${formatDistance(cam.distanceKm)} · ${escapeHtml(cam.quadrant || 'Calgary')}</small></span><span class="camera-item-actions"><button data-camera-focus="${idx}">MAP</button>${cam.url ? `<a href="${escapeHtml(cam.url)}" target="_blank" rel="noopener" data-camera-open="${idx}">OPEN</a>` : ''}</span></div>`).join('') : '<div class="no-events">No traffic camera data is available.</div>';
-  els.cameraModalList.querySelectorAll('[data-camera-focus]').forEach(btn => btn.addEventListener('click', () => { const cam = cameras[Number(btn.dataset.cameraFocus)]; if (mapReady && cam) { map.panTo({ lat: cam.coords[0], lng: cam.coords[1] }); map.setZoom(16); } }));
+  els.cameraModalList.querySelectorAll('[data-camera-focus]').forEach(btn => btn.addEventListener('click', () => { const cam = cameras[Number(btn.dataset.cameraFocus)]; if (mapReady && cam) { map.panTo(cam.coords); map.setZoom(16); } }));
   els.cameraModalList.querySelectorAll('[data-camera-open]').forEach(link => link.addEventListener('click', () => { const cam = cameras[Number(link.dataset.cameraOpen)]; operatorFor(event.id).actions.cameraChecked = true; addTimeline(event.id, `Camera opened: ${cam?.title || 'Traffic camera'}`); renderDetail(); }));
   els.cameraModal.classList.remove('hidden');
 }
@@ -424,8 +495,11 @@ function exportSelectedEvent() {
 function fitEvents() {
   if (!mapReady || !map) return;
   const pts = state.allEvents.filter(e => e.coords).map(e => e.coords);
-  if (!pts.length) { map.fitBounds({ south: CONFIG.calgaryBounds[0][0], west: CONFIG.calgaryBounds[0][1], north: CONFIG.calgaryBounds[1][0], east: CONFIG.calgaryBounds[1][1] }, 44); return; }
-  const bounds = new google.maps.LatLngBounds(); pts.forEach(([lat,lng]) => bounds.extend({ lat, lng })); map.fitBounds(bounds, 44); google.maps.event.addListenerOnce(map, 'idle', () => { if ((map.getZoom() || 0) > 13) map.setZoom(13); });
+  if (!pts.length) {
+    map.fitBounds(CONFIG.calgaryBounds, { padding: [44, 44], maxZoom: 13 });
+    return;
+  }
+  map.fitBounds(pts, { padding: [44, 44], maxZoom: 13 });
 }
 function openManualModal(coords = null) {
   els.manualEventModal.classList.remove('hidden');
@@ -465,7 +539,7 @@ function bindEvents() {
   els.contextCreateEventBtn.addEventListener('click', createEventAtContextLocation); els.contextCenterBtn.addEventListener('click', () => { if (mapReady && state.mapContextLatLng) map.panTo(state.mapContextLatLng); closeMapContextMenu(); });
   document.addEventListener('click', e => { if (!e.target.closest('#mapContextMenu')) closeMapContextMenu(); });
   els.closeModalBtn.addEventListener('click', closeManualModal); els.cancelModalBtn.addEventListener('click', closeManualModal); els.manualEventModal.addEventListener('click', e => { if (e.target === els.manualEventModal) closeManualModal(); });
-  els.useMapCenterBtn.addEventListener('click', () => { if (!mapReady || !map) return; const c = map.getCenter(); els.manualEventForm.elements.lat.value = c.lat().toFixed(6); els.manualEventForm.elements.lon.value = c.lng().toFixed(6); });
+  els.useMapCenterBtn.addEventListener('click', () => { if (!mapReady || !map) return; const c = map.getCenter(); els.manualEventForm.elements.lat.value = c.lat.toFixed(6); els.manualEventForm.elements.lon.value = c.lng.toFixed(6); });
   els.manualEventForm.addEventListener('submit', e => { e.preventDefault(); createManualEvent(new FormData(e.currentTarget)); e.currentTarget.reset(); });
   els.closeCameraModalBtn.addEventListener('click', closeCameraModal); els.cameraModal.addEventListener('click', e => { if (e.target === els.cameraModal) closeCameraModal(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeDrawer(); closeManualModal(); closeCameraModal(); closeMapContextMenu(); } });
