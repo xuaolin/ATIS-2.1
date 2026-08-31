@@ -1,11 +1,12 @@
-/* Calgary TMC Traffic Event Management — Phase 1 UX + Leaflet/OpenStreetMap */
+/* Calgary TMC Traffic Event Management — Phase 1 UX + Leaflet/OpenStreetMap + operational detour filtering */
 
 const CONFIG = {
   // No map API key required. Basemap uses OpenStreetMap standard tiles through Leaflet.
   calgaryCenter: [51.0447, -114.0719],
   calgaryBounds: [[50.75, -114.45], [51.35, -113.65]],
   refreshMs: 5 * 60 * 1000,
-  detourLookAheadHours: 24,
+  detourLookAheadHours: 6,
+  detourAssumedDurationHours: 8,
   nearbyCameraCount: 5,
   sources: {
     incidents: 'https://data.calgary.ca/resource/4jah-h97u.json?$limit=250',
@@ -78,10 +79,20 @@ function formatClockDate(d = new Date()) {
   els.dateLabel.textContent = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Edmonton', weekday: 'short', year: 'numeric', month: 'short', day: '2-digit' }).format(d).toUpperCase();
 }
 function relativeAge(value) {
-  const d = parseDate(value); if (!d) return '—';
+  const d = parseDate(value);
+  if (!d) return '—';
   const mins = Math.round((Date.now() - d.getTime()) / 60000);
-  if (mins < 1) return 'NOW'; if (mins < 60) return `${mins}m`;
-  const hrs = Math.round(mins / 60); if (hrs < 48) return `${hrs}h`;
+  if (mins < 0) {
+    const ahead = Math.abs(mins);
+    if (ahead < 60) return `IN ${ahead}m`;
+    const hrs = Math.round(ahead / 60);
+    if (hrs < 48) return `IN ${hrs}h`;
+    return `IN ${Math.round(hrs / 24)}d`;
+  }
+  if (mins < 1) return 'NOW';
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return `${hrs}h`;
   return `${Math.round(hrs / 24)}d`;
 }
 function pointFrom(obj) {
@@ -89,10 +100,24 @@ function pointFrom(obj) {
   const lat = Number(obj?.latitude ?? obj?.lat); const lon = Number(obj?.longitude ?? obj?.lon);
   return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
 }
-function inferPriority(text = '') {
+function firstDate(row, keys) {
+  for (const key of keys) {
+    const value = row?.[key];
+    if (parseDate(value)) return value;
+  }
+  return null;
+}
+function inferIncidentPriority(text = '') {
   const s = text.toLowerCase();
-  if (/all lanes|road closed|full closure|major|serious|multi-vehicle|emergency|fatal|blocked|closure/.test(s)) return 'HIGH';
-  if (/collision|signal|hazard|stalled|lane|detour|construction/.test(s)) return 'MEDIUM';
+  if (/all lanes?[^.]{0,30}closed|(?:full|complete|total)\s+(?:road\s+)?closure|road\s+closed|intersection\s+closed|emergency|serious|multi[- ]vehicle|major collision/.test(s)) return 'HIGH';
+  if (/collision|signal|hazard|stalled|blocked|lane/.test(s)) return 'MEDIUM';
+  return 'LOW';
+}
+function inferDetourPriority(text = '') {
+  const s = text.toLowerCase();
+  if (/all lanes?[^.]{0,30}closed|(?:full|complete|total)\s+(?:road\s+)?closure|road\s+closed|closed to all traffic|both directions?[^.]{0,30}closed|intersection\s+closed|bridge\s+closed|major detour/.test(s)) return 'HIGH';
+  if (/single[- ]lane|one lane[^.]{0,30}closed|shoulder|sidewalk|local access|drive with caution/.test(s)) return 'LOW';
+  if (/lanes?[^.]{0,30}closed|lane closure|ramp[^.]{0,30}closed|detour|reduced lanes?|alternating traffic|traffic impact|closure/.test(s)) return 'MEDIUM';
   return 'LOW';
 }
 function operatorFor(id) {
@@ -124,21 +149,49 @@ function normalizeIncident(row, i) {
   const coords = pointFrom(row);
   const title = row.incident_info || row.description || `Traffic incident ${i + 1}`;
   const description = row.description || row.incident_info || 'No additional description provided.';
-  return { id: `INC-${slug(title)}-${slug(row.start_dt || String(i))}`, sourceId: row.id || null, source: 'CITY OF CALGARY · CURRENT TRAFFIC INCIDENTS', type: 'INCIDENT', title, description, start: row.start_dt || null, updated: row.modified_dt || row.start_dt || null, coords, priority: inferPriority(`${title} ${description}`), raw: row };
+  const start = firstDate(row, ['start_dt','start_date','start','begin_dt']);
+  const updated = firstDate(row, ['modified_dt','updated_dt','updated','start_dt']) || start;
+  return { id: `INC-${slug(title)}-${slug(start || String(i))}`, sourceId: row.id || null, source: 'CITY OF CALGARY · CURRENT TRAFFIC INCIDENTS', type: 'INCIDENT', title, description, start, updated, coords, priority: inferIncidentPriority(`${title} ${description}`), raw: row };
 }
 function normalizeDetour(row, i) {
   const coords = pointFrom(row);
-  const title = row.construction_info || row.description || `Construction detour ${i + 1}`;
-  const description = row.description || row.construction_info || 'No additional description provided.';
-  return { id: `DET-${slug(title)}-${slug(row.start_dt || String(i))}`, source: 'CITY OF CALGARY · CONSTRUCTION DETOURS', type: 'DETOUR', title, description, start: row.start_dt || null, end: row.end_dt || null, updated: row.start_dt || null, coords, priority: inferPriority(`${title} ${description}`), raw: row };
+  const title = row.construction_info || row.detour_info || row.title || row.description || `Construction detour ${i + 1}`;
+  const description = row.description || row.construction_info || row.detour_info || 'No additional description provided.';
+  const start = firstDate(row, ['start_dt','start_date','start_datetime','start','begin_dt','from_dt']);
+  const end = firstDate(row, ['end_dt','end_date','end_datetime','end','finish_dt','to_dt']);
+  const updated = firstDate(row, ['modified_dt','updated_dt','updated','start_dt']) || start;
+  return { id: `DET-${slug(title)}-${slug(start || end || String(i))}`, source: 'CITY OF CALGARY · CONSTRUCTION DETOURS', type: 'DETOUR', title, description, start, end, updated, coords, priority: inferDetourPriority(`${title} ${description}`), raw: row };
 }
 function normalizeManual(row) { return { ...row, type: 'MANUAL', source: 'TMC MANUAL EVENT' }; }
+function isOperationalDetour(event) {
+  const s = `${event.title || ''} ${event.description || ''}`.toLowerCase();
+  return /closed|closure|lane|detour|ramp|traffic|intersection|access|road/.test(s);
+}
 function detourInWindow(event) {
   const now = Date.now();
-  const start = parseDate(event.start)?.getTime() ?? now;
-  const end = parseDate(event.end)?.getTime() ?? (start + 24*3600*1000);
-  const lookAhead = CONFIG.detourLookAheadHours * 3600 * 1000;
-  return end >= now && start <= now + lookAhead;
+  const horizon = now + CONFIG.detourLookAheadHours * 3600 * 1000;
+  const start = parseDate(event.start)?.getTime() ?? null;
+  const end = parseDate(event.end)?.getTime() ?? null;
+  if (start === null && end === null) return false;
+  if (end !== null && end < now) return false;
+  if (start !== null && start > horizon) return false;
+  if (start !== null && end !== null) return end >= now && start <= horizon;
+  if (start !== null) {
+    const assumedEnd = start + (CONFIG.detourAssumedDurationHours || 8) * 3600 * 1000;
+    return assumedEnd >= now && start <= horizon;
+  }
+  return end >= now && end <= horizon + 12 * 3600 * 1000;
+}
+function dedupeDetours(events) {
+  const seen = new Set();
+  return events.filter(event => {
+    const lat = event.coords?.[0]?.toFixed?.(4) || '';
+    const lon = event.coords?.[1]?.toFixed?.(4) || '';
+    const key = [slug(event.title), event.start || '', event.end || '', lat, lon].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 async function fetchJson(url) {
   const res = await fetch(url, { headers: { 'Accept': 'application/json, application/geo+json' } });
@@ -155,7 +208,7 @@ async function refreshData({ silent = false } = {}) {
     const name = tasks[idx][0];
     if (result.status === 'fulfilled') {
       if (name === 'incidents') state.incidents = (result.value || []).map(normalizeIncident).filter(e => e.coords);
-      if (name === 'detours') state.detours = (result.value || []).map(normalizeDetour).filter(e => e.coords).filter(detourInWindow);
+      if (name === 'detours') state.detours = dedupeDetours((result.value || []).map(normalizeDetour).filter(e => e.coords).filter(isOperationalDetour).filter(detourInWindow));
       if (name === 'cameras') state.cameras = (result.value || []).map((c, i) => ({ id: `CAM-${i}-${slug(c.camera_location || '')}`, title: c.camera_location || `Traffic camera ${i+1}`, quadrant: c.quadrant || '', url: typeof c.camera_url === 'object' ? c.camera_url.url : c.camera_url, coords: pointFrom(c), raw: c })).filter(c => c.coords);
       if (name === 'weather') state.weather = result.value?.features || [];
     } else {
