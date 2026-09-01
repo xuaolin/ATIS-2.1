@@ -188,15 +188,21 @@ function parseClockValue(hourText, minuteText, meridiemText) {
 }
 function scheduleAllowedDays(text) {
   const s = String(text || '').toLowerCase();
-  if (/weekdays?|monday\s*(?:-|–|—|to|through)\s*friday/.test(s)) return new Set([1,2,3,4,5]);
-  if (/weekends?/.test(s)) return new Set([0,6]);
+  const hasWeekdays = /weekdays?|monday\s*(?:-|–|—|to|through)\s*friday/.test(s);
+  const hasWeekends = /weekends?/.test(s);
+  if (hasWeekdays && hasWeekends) return new Set([0,1,2,3,4,5,6]);
+  if (hasWeekdays) return new Set([1,2,3,4,5]);
+  if (hasWeekends) return new Set([0,6]);
   const names = [['sun',0],['mon',1],['tue',2],['wed',3],['thu',4],['fri',5],['sat',6]];
   const found = names.filter(([name]) => new RegExp(`\\b${name}(?:day|sday|nesday|rsday|urday)?\\b`, 'i').test(s)).map(([,d]) => d);
   return found.length ? new Set(found) : new Set([0,1,2,3,4,5,6]);
 }
 function extractRecurringSchedule(text = '') {
-  const s = String(text).replace(/[–—]/g, '-');
-  const re = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|\bto\b|\buntil\b)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
+  const s = String(text)
+    .replace(/[–—−]/g, '-')
+    .replace(/\b([ap])\.?\s*m\.?\b/gi, '$1m')
+    .replace(/\s+/g, ' ');
+  const re = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|\bto\b|\buntil\b|\bthrough\b)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
   const match = s.match(re);
   if (!match) return null;
   let [, h1, m1, mer1, h2, m2, mer2] = match;
@@ -226,6 +232,10 @@ function evaluateRecurringSchedule(schedule, now = new Date()) {
   }
   return { active, nextStartMinutes };
 }
+function hasLimitedScheduleLanguage(text = '') {
+  const s = String(text).toLowerCase();
+  return /daily|nightly|weekdays?|weekends?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\bfrom\s+\d{1,2}|\bbetween\s+\d{1,2}|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?|am|pm)\s*(?:-|to|until|through)/i.test(s);
+}
 function strongContinuousImpact(text = '') {
   const s = text.toLowerCase();
   return /24\s*(?:hours?|hrs?)|24\/7|continuous|around the clock|all lanes?[^.]{0,30}closed|road\s+closed|closed to all traffic|intersection\s+closed|both directions?[^.]{0,30}closed|bridge\s+closed/.test(s);
@@ -253,7 +263,10 @@ function classifyDetour(event, nowMs = Date.now()) {
   if (start === null && end === null) return { operationalClass: 'EXCLUDE', activityReason: 'No schedule' };
   if (start !== null && end !== null) {
     const durationHours = (end - start) / 3600000;
-    if (durationHours <= CONFIG.longTermThresholdHours || strongContinuousImpact(`${event.title} ${event.description}`)) return { operationalClass: 'ACTIVE', activityReason: 'Active now' };
+    const impactText = `${event.title} ${event.description}`;
+    if (durationHours <= CONFIG.longTermThresholdHours) return { operationalClass: 'ACTIVE', activityReason: 'Active now' };
+    if (hasLimitedScheduleLanguage(impactText) && !schedule) return { operationalClass: 'PLANNED', activityReason: 'Scheduled hours · verify timing' };
+    if (strongContinuousImpact(impactText)) return { operationalClass: 'ACTIVE', activityReason: 'Continuous closure' };
     return { operationalClass: 'PLANNED', activityReason: 'Long-term construction' };
   }
   if (start !== null) {
@@ -287,7 +300,11 @@ function operationalLabel(event) {
 function queueTimeLabel(event) {
   if (event.operationalClass === 'ACTIVE' && event.type === 'DETOUR') return 'NOW';
   if (event.operationalClass === 'UPCOMING' && Number.isFinite(event.nextOccurrenceMinutes)) return `IN ${formatMinutesAhead(event.nextOccurrenceMinutes)}`;
-  if (event.operationalClass === 'PLANNED') return 'PLANNED';
+  if (event.operationalClass === 'PLANNED') {
+    const start = parseDate(event.start)?.getTime();
+    if (start && start > Date.now()) return relativeAge(event.start);
+    return 'SCHEDULED';
+  }
   return relativeAge(event.updated || event.start);
 }
 
@@ -353,13 +370,18 @@ function setAssignment(id, assigned, { announce = true } = {}) {
 }
 function toggleAssignment(id) { setAssignment(id, !isAssignedToMe(id)); }
 function beforeVerified(status) { return STATUS_ORDER.indexOf(status) < STATUS_ORDER.indexOf('VERIFIED'); }
+function needsVerification(event) {
+  if (!event || !['ACTIVE','UPCOMING'].includes(event.operationalClass)) return false;
+  const status = operatorFor(event.id).status;
+  return status === 'NEW' || status === 'REVIEW';
+}
 function openOperationalEvents() { return state.allEvents.filter(e => operatorFor(e.id).status !== 'CLOSED'); }
 function renderWorkspaceCounts() {
   const open = openOperationalEvents();
   els.workspaceAllCount.textContent = open.filter(e => e.operationalClass !== 'PLANNED').length;
   els.workspaceMyCount.textContent = open.filter(e => isAssignedToMe(e.id)).length;
   els.workspaceHighCount.textContent = open.filter(e => e.priority === 'HIGH' && e.operationalClass !== 'PLANNED').length;
-  els.workspaceUnverifiedCount.textContent = open.filter(e => beforeVerified(operatorFor(e.id).status) && e.operationalClass !== 'PLANNED').length;
+  els.workspaceUnverifiedCount.textContent = open.filter(needsVerification).length;
 }
 function setWorkspaceMode(mode) {
   state.workspaceMode = mode;
@@ -454,21 +476,33 @@ function sharedStreetTokens(a = '', b = '') {
   const tokens = s => new Set(String(s).toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(x => x.length > 2 && !stop.has(x)));
   const ta = tokens(a), tb = tokens(b); let count = 0; ta.forEach(t => { if (tb.has(t)) count++; }); return count;
 }
-function relatedEventsFor(event, limit = 10) {
+function relatedEventsFor(event, limit = 5) {
   if (!event) return [];
   const baseTime = parseDate(event.start || event.updated)?.getTime() || Date.now();
-  return state.allEvents.filter(e => e.id !== event.id && operatorFor(e.id).status !== 'CLOSED').map(e => {
-    const dist = event.coords && e.coords ? distanceKm(event.coords, e.coords) : Infinity;
-    const t = parseDate(e.start || e.updated)?.getTime() || baseTime; const hours = Math.abs(t - baseTime) / 3600000;
-    const shared = sharedStreetTokens(`${event.title} ${event.description}`, `${e.title} ${e.description}`);
-    const score = (dist <= 0.5 ? 6 : dist <= 1.5 ? 4 : dist <= 3 ? 2 : 0) + (hours <= 2 ? 3 : hours <= 12 ? 1 : 0) + Math.min(shared, 3);
-    return { event: e, distanceKm: dist, hoursApart: hours, shared, score };
-  }).filter(x => x.score >= 4).sort((a,b) => b.score - a.score || a.distanceKm - b.distanceKm).slice(0, limit);
+  return state.allEvents
+    .filter(e => e.id !== event.id && operatorFor(e.id).status !== 'CLOSED')
+    .map(e => {
+      const dist = event.coords && e.coords ? distanceKm(event.coords, e.coords) : Infinity;
+      const t = parseDate(e.start || e.updated)?.getTime() || baseTime;
+      const hours = Math.abs(t - baseTime) / 3600000;
+      const shared = sharedStreetTokens(`${event.title} ${event.description}`, `${e.title} ${e.description}`);
+      const corridorScore = Math.min(shared, 3) * 2;
+      const distanceScore = dist <= 0.25 ? 5 : dist <= 0.75 ? 4 : dist <= 1.5 ? 2 : dist <= 3 ? 1 : 0;
+      const timeScore = hours <= 1 ? 3 : hours <= 4 ? 2 : hours <= 12 ? 1 : 0;
+      const typeScore = e.type === event.type ? 1 : 0;
+      const classScore = e.operationalClass === event.operationalClass ? 1 : 0;
+      const score = corridorScore + distanceScore + timeScore + typeScore + classScore;
+      const confidence = Math.min(99, Math.round((score / 16) * 100));
+      return { event: e, distanceKm: dist, hoursApart: hours, shared, score, confidence };
+    })
+    .filter(x => x.score >= 7 && (x.shared >= 1 || x.distanceKm <= 0.45))
+    .sort((a,b) => b.score - a.score || a.distanceKm - b.distanceKm || a.hoursApart - b.hoursApart)
+    .slice(0, limit);
 }
 function renderRelatedEvents(event) {
   const related = relatedEventsFor(event); els.detailRelatedCount.textContent = related.length;
   if (!related.length) { els.relatedEventsList.innerHTML = '<div class="no-events">No strong related-event candidates found.</div>'; els.mergeSelectedBtn.disabled = true; return; }
-  els.relatedEventsList.innerHTML = related.map((r, idx) => `<div class="related-event-card"><input class="related-select" type="checkbox" data-merge-candidate="${escapeHtml(r.event.id)}" aria-label="Select related event"/><span class="related-event-copy"><strong>${escapeHtml(r.event.title)}</strong><small>${escapeHtml(operationalLabel(r.event))} · ${formatDistance(r.distanceKm)} · ${escapeHtml(r.event.priority)} priority</small></span><button class="related-open-btn" data-related-open="${escapeHtml(r.event.id)}">OPEN</button></div>`).join('');
+  els.relatedEventsList.innerHTML = related.map((r, idx) => `<div class="related-event-card"><input class="related-select" type="checkbox" data-merge-candidate="${escapeHtml(r.event.id)}" aria-label="Select related event"/><span class="related-event-copy"><strong>${escapeHtml(r.event.title)}</strong><small>${escapeHtml(operationalLabel(r.event))} · ${formatDistance(r.distanceKm)} · MATCH ${r.confidence}%</small></span><button class="related-open-btn" data-related-open="${escapeHtml(r.event.id)}">OPEN</button></div>`).join('');
   els.relatedEventsList.querySelectorAll('[data-related-open]').forEach(btn => btn.addEventListener('click', () => selectEvent(btn.dataset.relatedOpen)));
   els.relatedEventsList.querySelectorAll('[data-merge-candidate]').forEach(box => box.addEventListener('change', updateMergeButton));
   updateMergeButton();
@@ -701,10 +735,15 @@ function renderMap() {
     });
 
     const op = operatorFor(event.id);
-    marker.bindPopup(`<div class="gm-popup"><div class="popup-kicker">${escapeHtml(operationalLabel(event))} · ${escapeHtml(op.status)}</div><div class="popup-title">${escapeHtml(event.title)}</div><div>${escapeHtml(event.description).slice(0,180)}</div><div class="popup-actions"><button data-map-action="open" data-id="${escapeHtml(event.id)}">OPEN</button><button data-map-action="camera" data-id="${escapeHtml(event.id)}">CAMERAS</button><button data-map-action="verify" data-id="${escapeHtml(event.id)}">VERIFY</button></div></div>`);
+    marker.bindTooltip(`<div class="tmc-map-tooltip"><strong>${escapeHtml(event.title)}</strong><span>${escapeHtml(operationalLabel(event))} · ${escapeHtml(op.status)} · ${escapeHtml(event.priority)}</span></div>`, {
+      direction: 'top',
+      offset: [0, -14],
+      opacity: 0.96,
+      sticky: true,
+      className: 'tmc-event-tooltip'
+    });
 
-    marker.on('click', () => selectEvent(event.id, false));
-    marker.on('popupopen', bindPopupActions);
+    marker.on('click', () => { marker.closeTooltip(); selectEvent(event.id, false); });
     marker.addTo(layers[layerKey]);
 
     state.markersByEventId.set(event.id, marker);
@@ -794,7 +833,7 @@ function filteredEvents() {
     if (op.status === 'CLOSED') return false;
     if (state.workspaceMode === 'MY' && !isAssignedToMe(e.id)) return false;
     if (state.workspaceMode === 'HIGH' && !(e.priority === 'HIGH' && e.operationalClass !== 'PLANNED')) return false;
-    if (state.workspaceMode === 'UNVERIFIED' && !(beforeVerified(op.status) && e.operationalClass !== 'PLANNED')) return false;
+    if (state.workspaceMode === 'UNVERIFIED' && !needsVerification(e)) return false;
     if (state.filter === 'ACTIVE' && e.operationalClass !== 'ACTIVE') return false;
     if (state.filter === 'INCIDENT' && e.type !== 'INCIDENT') return false;
     if (state.filter === 'UPCOMING' && e.operationalClass !== 'UPCOMING') return false;
@@ -804,6 +843,11 @@ function filteredEvents() {
     return `${e.title} ${e.description} ${e.id} ${e.activityReason || ''}`.toLowerCase().includes(q);
   });
 }
+function eventTypeGlyph(event) {
+  if (event.type === 'INCIDENT') return '!';
+  if (event.type === 'MANUAL') return '+';
+  return '↪';
+}
 function renderQueue() {
   const events = filteredEvents(); els.queueCount.textContent = events.length;
   if (!events.length) { els.eventQueue.innerHTML = '<div class="no-events">No events match this operator view.</div>'; renderWorkspaceCounts(); return; }
@@ -812,7 +856,7 @@ function renderQueue() {
     const opClass = event.type === 'INCIDENT' ? 'incident' : String(event.operationalClass || 'planned').toLowerCase();
     const scheduleText = event.activityReason ? `<div class="event-schedule">${escapeHtml(event.activityReason)}</div>` : '';
     const assignment = isAssignedToMe(event.id) ? '<div class="event-assigned">MY EVENT</div>' : '';
-    return `<article class="event-card type-${escapeHtml(event.type)} operational-${escapeHtml(event.operationalClass || '')} priority-${event.priority} ${state.selectedId === event.id ? 'selected' : ''}" data-event-id="${escapeHtml(event.id)}"><span class="priority-line"></span><div class="event-card-head"><span class="event-type">${escapeHtml(event.type)}</span><span class="ops-class-badge ${opClass}">${escapeHtml(operationalLabel(event))}</span><span class="status-chip">${escapeHtml(op.status)}</span><span class="event-time">${escapeHtml(queueTimeLabel(event))}</span></div><h3>${escapeHtml(event.title)}</h3><p>${escapeHtml(event.description)}</p>${scheduleText}${assignment}<div class="quick-actions"><button class="quick-btn" data-quick="assign">${isAssignedToMe(event.id) ? 'UNASSIGN' : 'MY EVENT'}</button><button class="quick-btn ${verified ? 'success' : ''}" data-quick="verify">${verified ? 'VERIFIED' : 'VERIFY'}</button><button class="quick-btn" data-quick="open">OPEN</button></div></article>`;
+    return `<article class="event-card type-${escapeHtml(event.type)} operational-${escapeHtml(event.operationalClass || '')} priority-${event.priority} ${state.selectedId === event.id ? 'selected' : ''}" data-event-id="${escapeHtml(event.id)}"><span class="priority-line"></span><div class="event-card-head"><span class="event-type-icon ${opClass}" aria-hidden="true">${eventTypeGlyph(event)}</span><span class="ops-class-badge ${opClass}">${escapeHtml(operationalLabel(event))}</span><span class="status-chip">${escapeHtml(op.status)}</span><span class="event-time">${escapeHtml(queueTimeLabel(event))}</span></div><h3>${escapeHtml(event.title)}</h3><p>${escapeHtml(event.description)}</p>${scheduleText}${assignment}<div class="quick-actions"><button class="quick-btn" data-quick="assign">${isAssignedToMe(event.id) ? 'UNASSIGN' : 'MY EVENT'}</button><button class="quick-btn ${verified ? 'success' : ''}" data-quick="verify">${verified ? 'VERIFIED' : 'VERIFY'}</button><button class="quick-btn" data-quick="open">OPEN</button></div></article>`;
   }).join('');
   els.eventQueue.querySelectorAll('[data-event-id]').forEach(card => {
     card.addEventListener('click', () => selectEvent(card.dataset.eventId));
@@ -850,7 +894,8 @@ function renderDetail() {
   els.assignMeBtn.textContent = isAssignedToMe(event.id) ? 'UNASSIGN' : 'ASSIGN TO ME';
   els.assignMeBtn.classList.toggle('assigned', isAssignedToMe(event.id));
   const currentIdx = STATUS_ORDER.indexOf(op.status);
-  els.statusRail.innerHTML = STATUS_ORDER.map((s, idx) => `<div class="status-step ${idx < currentIdx ? 'done' : ''} ${idx === currentIdx ? 'current' : ''}">${s}</div>`).join('');
+  const workflowLabels = { NEW: 'NEW', REVIEW: 'REVIEW', VERIFIED: 'VERIFIED', RESPONDING: 'RESPONSE', MONITORING: 'MONITOR', CLEARED: 'CLEARED', CLOSED: 'CLOSED' };
+  els.statusRail.innerHTML = STATUS_ORDER.map((s, idx) => `<div class="status-step ${idx < currentIdx ? 'done' : ''} ${idx === currentIdx ? 'current' : ''}"><span>${idx + 1}</span><b>${workflowLabels[s] || s}</b></div>`).join('');
   const cta = STATUS_CTA[op.status] || ['NEXT STATUS', STATUS_ORDER[Math.min(currentIdx+1, STATUS_ORDER.length-1)]];
   els.primaryWorkflowBtn.textContent = cta[0]; els.primaryWorkflowBtn.dataset.targetStatus = cta[1];
   els.undoStatusBtn.disabled = !state.undoStack.some(item => item.kind === 'status' && item.eventId === event.id);
