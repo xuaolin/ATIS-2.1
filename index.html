@@ -7,7 +7,8 @@
   <meta name="description" content="Browser-based TMC traffic event management prototype using public Calgary traffic data." />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
-  <link rel="stylesheet" href="styles-phase1.css?v=phase15-20260831-1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+  <link rel="stylesheet" href="styles-phase1.css?v=phase2-20260831-1" />
 </head>
 <body>
   <div id="appShell">
@@ -27,6 +28,7 @@
 
       <div class="topbar-right">
         <button class="topbar-action" id="openQuickCreateBtn" title="Create a new event">+ EVENT</button>
+        <button class="notification-button" id="notificationBtn" type="button" aria-expanded="false" aria-controls="notificationPanel" title="Notifications"><span class="notification-bell">◆</span><span>ALERTS</span><b id="notificationBadge" class="notification-badge">0</b></button>
         <div class="system-health" id="systemHealth"><span class="health-dot"></span><span id="healthText">CONNECTING</span></div>
         <div class="clock-block">
           <div id="clock">--:--:--</div>
@@ -43,6 +45,20 @@
             <h2>EVENT QUEUE</h2>
           </div>
           <button class="icon-action" id="newEventBtn" title="Create event" aria-label="Create event">+</button>
+        </div>
+
+        <div class="operator-workspace">
+          <div class="workspace-shortcuts" id="workspaceShortcuts">
+            <button class="workspace-shortcut active" data-workspace="ALL"><span>OPS</span><b id="workspaceAllCount">0</b></button>
+            <button class="workspace-shortcut" data-workspace="MY"><span>MY EVENTS</span><b id="workspaceMyCount">0</b></button>
+            <button class="workspace-shortcut" data-workspace="HIGH"><span>HIGH</span><b id="workspaceHighCount">0</b></button>
+            <button class="workspace-shortcut" data-workspace="UNVERIFIED"><span>UNVERIFIED</span><b id="workspaceUnverifiedCount">0</b></button>
+          </div>
+          <div class="saved-views-row">
+            <div><span class="panel-kicker">SAVED VIEWS</span><small>Local operator workspace</small></div>
+            <button class="mini-action" id="saveViewBtn" type="button">+ SAVE</button>
+          </div>
+          <div class="saved-views-list" id="savedViewsList"></div>
         </div>
 
         <div class="queue-tools">
@@ -74,6 +90,7 @@
             <strong>CALGARY LIVE MAP</strong>
           </div>
           <div class="map-toolbar-actions">
+            <button class="btn draw-detour-btn" id="drawDetourBtn" type="button">DRAW DETOUR</button>
             <button class="btn layers-toggle-btn" id="layersToggleBtn" aria-expanded="false" aria-controls="layerBox">LAYERS</button>
             <button class="btn" id="fitEventsBtn">FIT EVENTS</button>
             <button class="btn" id="refreshBtn">REFRESH</button>
@@ -157,6 +174,7 @@
 
           <div class="drawer-commandbar" id="drawerCommandbar">
             <button class="command-btn primary" id="primaryWorkflowBtn">REVIEW EVENT</button>
+            <button class="command-btn" id="assignMeBtn">ASSIGN TO ME</button>
             <button class="command-btn" id="cameraCommandBtn">CAMERAS</button>
             <button class="command-btn" id="moreActionsBtn">ACTIONS</button>
           </div>
@@ -164,6 +182,7 @@
           <nav class="detail-tabs" id="detailTabs" aria-label="Event detail tabs">
             <button class="detail-tab active" data-tab="overview">OVERVIEW</button>
             <button class="detail-tab" data-tab="actions">ACTIONS</button>
+            <button class="detail-tab" data-tab="related">RELATED</button>
             <button class="detail-tab" data-tab="notes">NOTES</button>
             <button class="detail-tab" data-tab="activity">ACTIVITY</button>
           </nav>
@@ -175,6 +194,8 @@
                 <div><span>TYPE</span><strong id="detailType">—</strong></div>
                 <div><span>START</span><strong id="detailStart">—</strong></div>
                 <div><span>UPDATED</span><strong id="detailUpdated">—</strong></div>
+                <div><span>ASSIGNMENT</span><strong id="detailAssignment">UNASSIGNED</strong></div>
+                <div><span>RELATED</span><strong id="detailRelatedCount">0</strong></div>
               </div>
 
               <div class="detail-section compact">
@@ -221,6 +242,19 @@
               </div>
             </section>
 
+            <section class="tab-panel" data-tab-panel="related">
+              <div class="detail-section no-top">
+                <div class="section-title-row">
+                  <div>
+                    <div class="section-title">RELATED EVENTS</div>
+                    <div class="related-help">Nearby or temporally related events. Select records to create a local composite event.</div>
+                  </div>
+                  <button class="btn compact-btn" id="mergeSelectedBtn" type="button" disabled>MERGE SELECTED</button>
+                </div>
+                <div id="relatedEventsList" class="related-events-list"></div>
+              </div>
+            </section>
+
             <section class="tab-panel" data-tab-panel="notes">
               <div class="detail-section no-top">
                 <div class="section-title">OPERATOR NOTE</div>
@@ -258,8 +292,17 @@
     </footer>
   </div>
 
+  <aside class="notification-panel" id="notificationPanel" aria-hidden="true">
+    <div class="notification-head">
+      <div><div class="panel-kicker">OPERATOR AWARENESS</div><h2>NOTIFICATIONS</h2></div>
+      <div class="notification-head-actions"><button class="text-btn" id="markNotificationsReadBtn" type="button">MARK ALL READ</button><button class="icon-action subtle" id="closeNotificationBtn" type="button">×</button></div>
+    </div>
+    <div id="notificationList" class="notification-list"></div>
+  </aside>
+
   <div class="map-context-menu hidden" id="mapContextMenu">
     <button id="contextCreateEventBtn"><strong>+ Create event here</strong><span>Use this map location</span></button>
+    <button id="contextDrawDetourBtn"><strong>Draw detour route</strong><span>Create an operator route on the map</span></button>
     <button id="contextCenterBtn"><strong>Center map here</strong><span>Move the operating picture</span></button>
   </div>
 
@@ -304,10 +347,34 @@
     </div>
   </div>
 
+  <div class="modal-backdrop hidden" id="savedViewModal" role="dialog" aria-modal="true" aria-labelledby="savedViewTitle">
+    <div class="modal small-modal">
+      <div class="modal-head"><div><div class="panel-kicker">OPERATOR WORKSPACE</div><h2 id="savedViewTitle">SAVE CURRENT VIEW</h2></div><button class="icon-action subtle" id="closeSavedViewModalBtn" type="button">×</button></div>
+      <form id="savedViewForm">
+        <label>View name<input name="name" required maxlength="40" placeholder="e.g. Deerfoot AM Operations" /></label>
+        <div class="saved-view-summary" id="savedViewSummary"></div>
+        <div class="modal-actions"><div class="spacer"></div><button type="button" class="btn" id="cancelSavedViewBtn">CANCEL</button><button type="submit" class="btn btn-accent">SAVE VIEW</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="mergeModal" role="dialog" aria-modal="true" aria-labelledby="mergeModalTitle">
+    <div class="modal">
+      <div class="modal-head"><div><div class="panel-kicker">EVENT CORRELATION</div><h2 id="mergeModalTitle">CREATE COMPOSITE EVENT</h2></div><button class="icon-action subtle" id="closeMergeModalBtn" type="button">×</button></div>
+      <form id="mergeForm">
+        <label>Composite title<input name="title" required maxlength="120" /></label>
+        <label>Operator summary<textarea name="description" rows="4" required></textarea></label>
+        <div class="merge-preview" id="mergePreview"></div>
+        <div class="modal-actions"><div class="spacer"></div><button type="button" class="btn" id="cancelMergeBtn">CANCEL</button><button type="submit" class="btn btn-accent">CREATE COMPOSITE</button></div>
+      </form>
+    </div>
+  </div>
+
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-  <script src="app-phase1.js?v=phase15-20260831-1"></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="app-phase1.js?v=phase2-20260831-1"></script>
 </body>
 </html>
