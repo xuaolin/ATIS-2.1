@@ -5,7 +5,9 @@ const CONFIG = {
   calgaryCenter: [51.0447, -114.0719],
   calgaryBounds: [[50.75, -114.45], [51.35, -113.65]],
   refreshMs: 5 * 60 * 1000,
-  detourLookAheadHours: 6,
+  upcomingLookAheadHours: 3,
+  plannedLookAheadHours: 24 * 7,
+  longTermThresholdHours: 36,
   detourAssumedDurationHours: 8,
   nearbyCameraCount: 5,
   sources: {
@@ -44,12 +46,12 @@ const state = {
   operator: loadLocal('tmc_operator_state_v1', {}),
   allEvents: [],
   selectedId: null,
-  filter: 'ALL',
+  filter: 'ACTIVE',
   search: '',
   activeTab: 'overview',
   feedErrors: [],
   markersByEventId: new Map(),
-  layersEnabled: { INCIDENT: true, DETOUR: true, MANUAL: true, CAMERA: false, WEATHER: true },
+  layersEnabled: { INCIDENT: true, ACTIVE: true, UPCOMING: true, PLANNED: false, MANUAL: true, CAMERA: false, WEATHER: true },
   mapContextLatLng: null,
   undoStack: []
 };
@@ -145,13 +147,141 @@ function toast(title, detail = '', { type = 'success', actionLabel = '', onActio
   }
 }
 
+function calgaryClockParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Edmonton',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(date);
+  const get = type => parts.find(p => p.type === type)?.value;
+  const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return { day: dayMap[get('weekday')] ?? date.getDay(), minuteOfDay: Number(get('hour') || 0) * 60 + Number(get('minute') || 0) };
+}
+function parseClockValue(hourText, minuteText, meridiemText) {
+  let h = Number(hourText); const m = Number(minuteText || 0); const mer = String(meridiemText || '').toLowerCase();
+  if (!Number.isFinite(h) || !Number.isFinite(m) || m > 59) return null;
+  if (mer) {
+    if (h < 1 || h > 12) return null;
+    if (mer === 'pm' && h !== 12) h += 12;
+    if (mer === 'am' && h === 12) h = 0;
+  }
+  if (h < 0 || h > 23) return null;
+  return h * 60 + m;
+}
+function scheduleAllowedDays(text) {
+  const s = String(text || '').toLowerCase();
+  if (/weekdays?|monday\s*(?:-|–|—|to|through)\s*friday/.test(s)) return new Set([1,2,3,4,5]);
+  if (/weekends?/.test(s)) return new Set([0,6]);
+  const names = [['sun',0],['mon',1],['tue',2],['wed',3],['thu',4],['fri',5],['sat',6]];
+  const found = names.filter(([name]) => new RegExp(`\\b${name}(?:day|sday|nesday|rsday|urday)?\\b`, 'i').test(s)).map(([,d]) => d);
+  return found.length ? new Set(found) : new Set([0,1,2,3,4,5,6]);
+}
+function extractRecurringSchedule(text = '') {
+  const s = String(text).replace(/[–—]/g, '-');
+  const re = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|\bto\b|\buntil\b)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
+  const match = s.match(re);
+  if (!match) return null;
+  let [, h1, m1, mer1, h2, m2, mer2] = match;
+  if (!mer1 && mer2 && Number(h1) <= 12 && Number(h2) <= 12) mer1 = mer2;
+  const startMin = parseClockValue(h1, m1, mer1);
+  const endMin = parseClockValue(h2, m2, mer2);
+  if (startMin === null || endMin === null || startMin === endMin) return null;
+  const fmt = mins => `${String(Math.floor(mins/60)).padStart(2,'0')}:${String(mins%60).padStart(2,'0')}`;
+  return { startMin, endMin, allowedDays: scheduleAllowedDays(s), label: `${fmt(startMin)}–${fmt(endMin)}` };
+}
+function evaluateRecurringSchedule(schedule, now = new Date()) {
+  if (!schedule) return { active: false, nextStartMinutes: Infinity };
+  const { day, minuteOfDay } = calgaryClockParts(now);
+  const allowed = d => schedule.allowedDays.has((d + 7) % 7);
+  let active = false;
+  if (schedule.startMin < schedule.endMin) {
+    active = allowed(day) && minuteOfDay >= schedule.startMin && minuteOfDay < schedule.endMin;
+  } else {
+    active = (allowed(day) && minuteOfDay >= schedule.startMin) || (allowed(day - 1) && minuteOfDay < schedule.endMin);
+  }
+  let nextStartMinutes = Infinity;
+  for (let deltaDay = 0; deltaDay <= 7; deltaDay++) {
+    const targetDay = (day + deltaDay) % 7;
+    if (!allowed(targetDay)) continue;
+    const diff = deltaDay * 1440 + schedule.startMin - minuteOfDay;
+    if (diff > 0) { nextStartMinutes = diff; break; }
+  }
+  return { active, nextStartMinutes };
+}
+function strongContinuousImpact(text = '') {
+  const s = text.toLowerCase();
+  return /24\s*(?:hours?|hrs?)|24\/7|continuous|around the clock|all lanes?[^.]{0,30}closed|road\s+closed|closed to all traffic|intersection\s+closed|both directions?[^.]{0,30}closed|bridge\s+closed/.test(s);
+}
+function classifyDetour(event, nowMs = Date.now()) {
+  const start = parseDate(event.start)?.getTime() ?? null;
+  const end = parseDate(event.end)?.getTime() ?? null;
+  const upcomingMs = CONFIG.upcomingLookAheadHours * 3600 * 1000;
+  const plannedMs = CONFIG.plannedLookAheadHours * 3600 * 1000;
+  if (end !== null && end < nowMs) return { operationalClass: 'EXCLUDE', activityReason: 'Expired' };
+  if (start !== null && start > nowMs) {
+    const diff = start - nowMs;
+    if (diff <= upcomingMs) return { operationalClass: 'UPCOMING', activityReason: `Starts ${relativeAge(event.start)}` };
+    if (diff <= plannedMs) return { operationalClass: 'PLANNED', activityReason: 'Scheduled work' };
+    return { operationalClass: 'EXCLUDE', activityReason: 'Outside planning window' };
+  }
+  const schedule = event.schedule || extractRecurringSchedule(`${event.title} ${event.description}`);
+  if (schedule) {
+    const timing = evaluateRecurringSchedule(schedule);
+    event.nextOccurrenceMinutes = timing.nextStartMinutes;
+    if (timing.active) return { operationalClass: 'ACTIVE', activityReason: `Active · ${schedule.label}` };
+    if (timing.nextStartMinutes <= CONFIG.upcomingLookAheadHours * 60) return { operationalClass: 'UPCOMING', activityReason: `Starts in ${formatMinutesAhead(timing.nextStartMinutes)} · ${schedule.label}` };
+    return { operationalClass: 'PLANNED', activityReason: `Scheduled · ${schedule.label}` };
+  }
+  if (start === null && end === null) return { operationalClass: 'EXCLUDE', activityReason: 'No schedule' };
+  if (start !== null && end !== null) {
+    const durationHours = (end - start) / 3600000;
+    if (durationHours <= CONFIG.longTermThresholdHours || strongContinuousImpact(`${event.title} ${event.description}`)) return { operationalClass: 'ACTIVE', activityReason: 'Active now' };
+    return { operationalClass: 'PLANNED', activityReason: 'Long-term construction' };
+  }
+  if (start !== null) {
+    const assumedEnd = start + CONFIG.detourAssumedDurationHours * 3600000;
+    return assumedEnd >= nowMs ? { operationalClass: 'ACTIVE', activityReason: 'Active now' } : { operationalClass: 'EXCLUDE', activityReason: 'Assumed complete' };
+  }
+  return end !== null && end - nowMs <= 12 * 3600000 ? { operationalClass: 'ACTIVE', activityReason: 'Active now' } : { operationalClass: 'PLANNED', activityReason: 'Scheduled work' };
+}
+function formatMinutesAhead(mins) {
+  if (!Number.isFinite(mins)) return 'later';
+  if (mins < 60) return `${Math.max(1, Math.round(mins))}m`;
+  return `${Math.round(mins / 60)}h`;
+}
+function classifyManual(event) {
+  const start = parseDate(event.start)?.getTime();
+  if (!start || start <= Date.now()) return 'ACTIVE';
+  const diff = start - Date.now();
+  return diff <= CONFIG.upcomingLookAheadHours * 3600000 ? 'UPCOMING' : 'PLANNED';
+}
+function eventLayerKey(event) {
+  if (event.type === 'INCIDENT') return 'INCIDENT';
+  if (event.type === 'MANUAL') return 'MANUAL';
+  return ['ACTIVE','UPCOMING','PLANNED'].includes(event.operationalClass) ? event.operationalClass : 'PLANNED';
+}
+function operationalLabel(event) {
+  if (event.type === 'INCIDENT') return 'INCIDENT';
+  if (event.type === 'MANUAL') return event.operationalClass === 'UPCOMING' ? 'UPCOMING MANUAL' : 'MANUAL';
+  if (event.operationalClass === 'ACTIVE') return 'ACTIVE CLOSURE';
+  return event.operationalClass || 'PLANNED';
+}
+function queueTimeLabel(event) {
+  if (event.operationalClass === 'ACTIVE' && event.type === 'DETOUR') return 'NOW';
+  if (event.operationalClass === 'UPCOMING' && Number.isFinite(event.nextOccurrenceMinutes)) return `IN ${formatMinutesAhead(event.nextOccurrenceMinutes)}`;
+  if (event.operationalClass === 'PLANNED') return 'PLANNED';
+  return relativeAge(event.updated || event.start);
+}
+
 function normalizeIncident(row, i) {
   const coords = pointFrom(row);
   const title = row.incident_info || row.description || `Traffic incident ${i + 1}`;
   const description = row.description || row.incident_info || 'No additional description provided.';
   const start = firstDate(row, ['start_dt','start_date','start','begin_dt']);
   const updated = firstDate(row, ['modified_dt','updated_dt','updated','start_dt']) || start;
-  return { id: `INC-${slug(title)}-${slug(start || String(i))}`, sourceId: row.id || null, source: 'CITY OF CALGARY · CURRENT TRAFFIC INCIDENTS', type: 'INCIDENT', title, description, start, updated, coords, priority: inferIncidentPriority(`${title} ${description}`), raw: row };
+  return { id: `INC-${slug(title)}-${slug(start || String(i))}`, sourceId: row.id || null, source: 'CITY OF CALGARY · CURRENT TRAFFIC INCIDENTS', type: 'INCIDENT', operationalClass: 'ACTIVE', title, description, start, updated, coords, priority: inferIncidentPriority(`${title} ${description}`), raw: row };
 }
 function normalizeDetour(row, i) {
   const coords = pointFrom(row);
@@ -160,27 +290,19 @@ function normalizeDetour(row, i) {
   const start = firstDate(row, ['start_dt','start_date','start_datetime','start','begin_dt','from_dt']);
   const end = firstDate(row, ['end_dt','end_date','end_datetime','end','finish_dt','to_dt']);
   const updated = firstDate(row, ['modified_dt','updated_dt','updated','start_dt']) || start;
-  return { id: `DET-${slug(title)}-${slug(start || end || String(i))}`, source: 'CITY OF CALGARY · CONSTRUCTION DETOURS', type: 'DETOUR', title, description, start, end, updated, coords, priority: inferDetourPriority(`${title} ${description}`), raw: row };
+  const event = { id: `DET-${slug(title)}-${slug(start || end || String(i))}`, source: 'CITY OF CALGARY · CONSTRUCTION / ROAD RESTRICTIONS', type: 'DETOUR', title, description, start, end, updated, coords, priority: inferDetourPriority(`${title} ${description}`), raw: row };
+  event.schedule = extractRecurringSchedule(`${title} ${description}`);
+  Object.assign(event, classifyDetour(event));
+  return event;
 }
-function normalizeManual(row) { return { ...row, type: 'MANUAL', source: 'TMC MANUAL EVENT' }; }
+function normalizeManual(row) {
+  const event = { ...row, type: 'MANUAL', source: 'TMC MANUAL EVENT' };
+  event.operationalClass = classifyManual(event);
+  return event;
+}
 function isOperationalDetour(event) {
   const s = `${event.title || ''} ${event.description || ''}`.toLowerCase();
-  return /closed|closure|lane|detour|ramp|traffic|intersection|access|road/.test(s);
-}
-function detourInWindow(event) {
-  const now = Date.now();
-  const horizon = now + CONFIG.detourLookAheadHours * 3600 * 1000;
-  const start = parseDate(event.start)?.getTime() ?? null;
-  const end = parseDate(event.end)?.getTime() ?? null;
-  if (start === null && end === null) return false;
-  if (end !== null && end < now) return false;
-  if (start !== null && start > horizon) return false;
-  if (start !== null && end !== null) return end >= now && start <= horizon;
-  if (start !== null) {
-    const assumedEnd = start + (CONFIG.detourAssumedDurationHours || 8) * 3600 * 1000;
-    return assumedEnd >= now && start <= horizon;
-  }
-  return end >= now && end <= horizon + 12 * 3600 * 1000;
+  return /closed|closure|lane|detour|ramp|traffic|intersection|access|road|reduced/.test(s);
 }
 function dedupeDetours(events) {
   const seen = new Set();
@@ -208,7 +330,7 @@ async function refreshData({ silent = false } = {}) {
     const name = tasks[idx][0];
     if (result.status === 'fulfilled') {
       if (name === 'incidents') state.incidents = (result.value || []).map(normalizeIncident).filter(e => e.coords);
-      if (name === 'detours') state.detours = dedupeDetours((result.value || []).map(normalizeDetour).filter(e => e.coords).filter(isOperationalDetour).filter(detourInWindow));
+      if (name === 'detours') state.detours = dedupeDetours((result.value || []).map(normalizeDetour).filter(e => e.coords).filter(isOperationalDetour).filter(e => e.operationalClass !== 'EXCLUDE'));
       if (name === 'cameras') state.cameras = (result.value || []).map((c, i) => ({ id: `CAM-${i}-${slug(c.camera_location || '')}`, title: c.camera_location || `Traffic camera ${i+1}`, quadrant: c.quadrant || '', url: typeof c.camera_url === 'object' ? c.camera_url.url : c.camera_url, coords: pointFrom(c), raw: c })).filter(c => c.coords);
       if (name === 'weather') state.weather = result.value?.features || [];
     } else {
@@ -226,12 +348,20 @@ async function refreshData({ silent = false } = {}) {
 
 function injectDemoFallback() {
   const now = new Date();
-  state.incidents = [{ id: 'DEMO-INC-001', source: 'DEMO FALLBACK · LIVE FEED UNAVAILABLE', type: 'INCIDENT', title: 'Demo collision — Deerfoot Trail NE', description: 'Sample event displayed only because live public feeds could not be reached from this browser.', start: new Date(now.getTime() - 18*60000).toISOString(), updated: now.toISOString(), coords: [51.084, -113.992], priority: 'HIGH', raw: {} }];
-  state.detours = [{ id: 'DEMO-DET-001', source: 'DEMO FALLBACK · LIVE FEED UNAVAILABLE', type: 'DETOUR', title: 'Demo planned closure — 16 Avenue NW', description: 'Sample construction detour for interface demonstration.', start: new Date(now.getTime() - 60*60000).toISOString(), end: new Date(now.getTime() + 8*3600*1000).toISOString(), updated: now.toISOString(), coords: [51.067, -114.105], priority: 'MEDIUM', raw: {} }];
+  state.incidents = [{ id: 'DEMO-INC-001', source: 'DEMO FALLBACK · LIVE FEED UNAVAILABLE', type: 'INCIDENT', operationalClass: 'ACTIVE', title: 'Demo collision — Deerfoot Trail NE', description: 'Sample event displayed only because live public feeds could not be reached from this browser.', start: new Date(now.getTime() - 18*60000).toISOString(), updated: now.toISOString(), coords: [51.084, -113.992], priority: 'HIGH', raw: {} }];
+  state.detours = [{ id: 'DEMO-DET-001', source: 'DEMO FALLBACK · LIVE FEED UNAVAILABLE', type: 'DETOUR', operationalClass: 'ACTIVE', activityReason: 'Active now', title: 'Demo planned closure — 16 Avenue NW', description: 'Sample construction detour for interface demonstration.', start: new Date(now.getTime() - 60*60000).toISOString(), end: new Date(now.getTime() + 8*3600*1000).toISOString(), updated: now.toISOString(), coords: [51.067, -114.105], priority: 'MEDIUM', raw: {} }];
 }
 function rebuildEvents() {
   const manual = state.manual.map(normalizeManual);
-  state.allEvents = [...state.incidents, ...state.detours, ...manual].sort((a, b) => (parseDate(b.updated || b.start)?.getTime() || 0) - (parseDate(a.updated || a.start)?.getTime() || 0));
+  const classRank = { ACTIVE: 0, UPCOMING: 1, PLANNED: 2 };
+  const priorityRank = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+  state.allEvents = [...state.incidents, ...state.detours, ...manual].sort((a, b) => {
+    const classDiff = (classRank[a.operationalClass] ?? 9) - (classRank[b.operationalClass] ?? 9);
+    if (classDiff) return classDiff;
+    const priorityDiff = (priorityRank[a.priority] ?? 9) - (priorityRank[b.priority] ?? 9);
+    if (priorityDiff) return priorityDiff;
+    return (parseDate(b.updated || b.start)?.getTime() || 0) - (parseDate(a.updated || a.start)?.getTime() || 0);
+  });
 }
 function updateHealth() {
   els.systemHealth.classList.remove('healthy', 'degraded');
@@ -274,10 +404,28 @@ function initMap() {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
 
+  const makeClusterGroup = kind => {
+    if (!L.markerClusterGroup) return L.layerGroup();
+    return L.markerClusterGroup({
+      maxClusterRadius: kind === 'PLANNED' ? 55 : 44,
+      disableClusteringAtZoom: 15,
+      showCoverageOnHover: false,
+      spiderfyOnMaxZoom: true,
+      removeOutsideVisibleBounds: true,
+      iconCreateFunction: cluster => L.divIcon({
+        className: `tmc-cluster tmc-cluster-${kind.toLowerCase()}`,
+        html: `<div class="tmc-cluster-bubble">${cluster.getChildCount()}</div>`,
+        iconSize: [38, 38],
+        iconAnchor: [19, 19]
+      })
+    });
+  };
   layers = {
-    INCIDENT: L.layerGroup(),
-    DETOUR: L.layerGroup(),
-    MANUAL: L.layerGroup(),
+    INCIDENT: makeClusterGroup('INCIDENT'),
+    ACTIVE: makeClusterGroup('ACTIVE'),
+    UPCOMING: makeClusterGroup('UPCOMING'),
+    PLANNED: makeClusterGroup('PLANNED'),
+    MANUAL: makeClusterGroup('MANUAL'),
     CAMERA: L.layerGroup()
   };
 
@@ -309,7 +457,9 @@ function initMap() {
 function markerIcon(type) {
   const styles = {
     INCIDENT: { fill: '#d82f43', stroke: '#fff', glyph: '!' },
-    DETOUR: { fill: '#e6a23c', stroke: '#fff', glyph: '↪' },
+    ACTIVE: { fill: '#e08b28', stroke: '#fff', glyph: '↪' },
+    UPCOMING: { fill: '#c4a61e', stroke: '#fff', glyph: 'U' },
+    PLANNED: { fill: '#6d7e89', stroke: '#fff', glyph: 'P' },
     MANUAL: { fill: '#35bce8', stroke: '#fff', glyph: '+' },
     CAMERA: { fill: '#526779', stroke: '#fff', glyph: '●' }
   };
@@ -337,19 +487,20 @@ function renderMap() {
   clearMapLayers();
 
   state.allEvents.forEach(event => {
-    if (!event.coords || !layers[event.type]) return;
+    const layerKey = eventLayerKey(event);
+    if (!event.coords || !layers[layerKey]) return;
     const marker = L.marker(event.coords, {
-      icon: markerIcon(event.type),
+      icon: markerIcon(layerKey),
       title: event.title,
       riseOnHover: true
     });
 
     const op = operatorFor(event.id);
-    marker.bindPopup(`<div class="gm-popup"><div class="popup-kicker">${escapeHtml(event.type)} · ${escapeHtml(op.status)}</div><div class="popup-title">${escapeHtml(event.title)}</div><div>${escapeHtml(event.description).slice(0,180)}</div><div class="popup-actions"><button data-map-action="open" data-id="${escapeHtml(event.id)}">OPEN</button><button data-map-action="camera" data-id="${escapeHtml(event.id)}">CAMERAS</button><button data-map-action="verify" data-id="${escapeHtml(event.id)}">VERIFY</button></div></div>`);
+    marker.bindPopup(`<div class="gm-popup"><div class="popup-kicker">${escapeHtml(operationalLabel(event))} · ${escapeHtml(op.status)}</div><div class="popup-title">${escapeHtml(event.title)}</div><div>${escapeHtml(event.description).slice(0,180)}</div><div class="popup-actions"><button data-map-action="open" data-id="${escapeHtml(event.id)}">OPEN</button><button data-map-action="camera" data-id="${escapeHtml(event.id)}">CAMERAS</button><button data-map-action="verify" data-id="${escapeHtml(event.id)}">VERIFY</button></div></div>`);
 
     marker.on('click', () => selectEvent(event.id, false));
     marker.on('popupopen', bindPopupActions);
-    marker.addTo(layers[event.type]);
+    marker.addTo(layers[layerKey]);
 
     state.markersByEventId.set(event.id, marker);
   });
@@ -391,7 +542,7 @@ function bindPopupActions() {
 function syncLayerVisibility() {
   if (!mapReady || !map) return;
 
-  ['INCIDENT','DETOUR','MANUAL','CAMERA'].forEach(name => {
+  ['INCIDENT','ACTIVE','UPCOMING','PLANNED','MANUAL','CAMERA'].forEach(name => {
     const group = layers[name];
     if (!group) return;
     if (state.layersEnabled[name]) {
@@ -429,14 +580,26 @@ function createEventAtContextLocation() {
 
 function filteredEvents() {
   const q = state.search.trim().toLowerCase();
-  return state.allEvents.filter(e => { if (state.filter !== 'ALL' && e.type !== state.filter) return false; if (!q) return true; return `${e.title} ${e.description} ${e.id}`.toLowerCase().includes(q); });
+  return state.allEvents.filter(e => {
+    const op = operatorFor(e.id);
+    if (op.status === 'CLOSED') return false;
+    if (state.filter === 'ACTIVE' && e.operationalClass !== 'ACTIVE') return false;
+    if (state.filter === 'INCIDENT' && e.type !== 'INCIDENT') return false;
+    if (state.filter === 'UPCOMING' && e.operationalClass !== 'UPCOMING') return false;
+    if (state.filter === 'PLANNED' && e.operationalClass !== 'PLANNED') return false;
+    if (state.filter === 'MANUAL' && e.type !== 'MANUAL') return false;
+    if (!q) return true;
+    return `${e.title} ${e.description} ${e.id} ${e.activityReason || ''}`.toLowerCase().includes(q);
+  });
 }
 function renderQueue() {
   const events = filteredEvents(); els.queueCount.textContent = events.length;
-  if (!events.length) { els.eventQueue.innerHTML = '<div class="no-events">No events match the current filter.</div>'; return; }
+  if (!events.length) { els.eventQueue.innerHTML = '<div class="no-events">No events match this operational view.</div>'; return; }
   els.eventQueue.innerHTML = events.map(event => {
     const op = operatorFor(event.id); const verified = op.status === 'VERIFIED' || STATUS_ORDER.indexOf(op.status) > STATUS_ORDER.indexOf('VERIFIED');
-    return `<article class="event-card priority-${event.priority} ${state.selectedId === event.id ? 'selected' : ''}" data-event-id="${escapeHtml(event.id)}"><span class="priority-line"></span><div class="event-card-head"><span class="event-type">${escapeHtml(event.type)}</span><span class="status-chip">${escapeHtml(op.status)}</span><span class="event-time">${relativeAge(event.updated || event.start)}</span></div><h3>${escapeHtml(event.title)}</h3><p>${escapeHtml(event.description)}</p><div class="quick-actions"><button class="quick-btn" data-quick="camera">CAMERA</button><button class="quick-btn ${verified ? 'success' : ''}" data-quick="verify">${verified ? 'VERIFIED' : 'VERIFY'}</button><button class="quick-btn" data-quick="open">OPEN</button></div></article>`;
+    const opClass = event.type === 'INCIDENT' ? 'incident' : String(event.operationalClass || 'planned').toLowerCase();
+    const scheduleText = event.activityReason ? `<div class="event-schedule">${escapeHtml(event.activityReason)}</div>` : '';
+    return `<article class="event-card type-${escapeHtml(event.type)} operational-${escapeHtml(event.operationalClass || '')} priority-${event.priority} ${state.selectedId === event.id ? 'selected' : ''}" data-event-id="${escapeHtml(event.id)}"><span class="priority-line"></span><div class="event-card-head"><span class="event-type">${escapeHtml(event.type)}</span><span class="ops-class-badge ${opClass}">${escapeHtml(operationalLabel(event))}</span><span class="status-chip">${escapeHtml(op.status)}</span><span class="event-time">${escapeHtml(queueTimeLabel(event))}</span></div><h3>${escapeHtml(event.title)}</h3><p>${escapeHtml(event.description)}</p>${scheduleText}<div class="quick-actions"><button class="quick-btn" data-quick="camera">CAMERA</button><button class="quick-btn ${verified ? 'success' : ''}" data-quick="verify">${verified ? 'VERIFIED' : 'VERIFY'}</button><button class="quick-btn" data-quick="open">OPEN</button></div></article>`;
   }).join('');
   els.eventQueue.querySelectorAll('[data-event-id]').forEach(card => {
     card.addEventListener('click', () => selectEvent(card.dataset.eventId));
@@ -465,7 +628,7 @@ function switchDetailTab(tab) {
 function renderDetail() {
   const event = state.allEvents.find(e => e.id === state.selectedId); if (!event) return;
   const op = operatorFor(event.id);
-  els.detailSource.textContent = event.source; els.detailTitle.textContent = event.title; els.detailId.textContent = event.id; els.detailType.textContent = event.type;
+  els.detailSource.textContent = event.source; els.detailTitle.textContent = event.title; els.detailId.textContent = event.id; els.detailType.textContent = event.type === 'DETOUR' ? `${event.type} · ${event.operationalClass}` : event.type;
   els.detailStart.textContent = formatTime(event.start); els.detailUpdated.textContent = formatTime(event.updated || event.start); els.detailDescription.textContent = event.description;
   els.detailPriority.textContent = event.priority; els.detailPriority.className = `priority-badge ${event.priority.toLowerCase()}`; els.detailStatus.textContent = op.status;
   const currentIdx = STATUS_ORDER.indexOf(op.status);
@@ -539,17 +702,20 @@ function showCameraModal() {
 function closeCameraModal() { els.cameraModal.classList.add('hidden'); }
 
 function renderKPIs() {
-  els.kpiIncidents.textContent = state.incidents.filter(e => operatorFor(e.id).status !== 'CLOSED').length;
-  els.kpiDetours.textContent = state.detours.filter(e => operatorFor(e.id).status !== 'CLOSED').length;
-  els.kpiHigh.textContent = state.allEvents.filter(e => e.priority === 'HIGH' && operatorFor(e.id).status !== 'CLOSED').length;
+  const open = e => operatorFor(e.id).status !== 'CLOSED';
+  els.kpiIncidents.textContent = state.incidents.filter(open).length;
+  els.kpiActiveClosures.textContent = state.detours.filter(e => open(e) && e.operationalClass === 'ACTIVE').length;
+  els.kpiUpcoming.textContent = state.allEvents.filter(e => open(e) && e.operationalClass === 'UPCOMING').length;
+  els.kpiHigh.textContent = state.allEvents.filter(e => open(e) && e.operationalClass !== 'PLANNED' && e.priority === 'HIGH').length;
   els.kpiWeather.textContent = state.weather.length;
 }
 function renderTicker() {
   const messages = [];
   state.incidents.slice(0,4).forEach(e => messages.push(`INCIDENT · ${e.title} · updated ${formatTime(e.updated || e.start)}`));
-  state.detours.slice(0,3).forEach(e => messages.push(`DETOUR · ${e.title} · start ${formatTime(e.start)}`));
-  state.weather.slice(0,3).forEach(f => { const p = f.properties || {}; messages.push(`WEATHER · ${p.alert_name_en || p.alert_short_name_en || 'Alert'} · ${p.feature_name_en || 'Calgary region'}`); });
-  if (!messages.length) messages.push('No live updates available.'); els.ticker.textContent = messages.join('     ◆     ');
+  state.detours.filter(e => e.operationalClass === 'ACTIVE').slice(0,3).forEach(e => messages.push(`ACTIVE CLOSURE · ${e.title}${e.activityReason ? ` · ${e.activityReason}` : ''}`));
+  state.detours.filter(e => e.operationalClass === 'UPCOMING').slice(0,3).forEach(e => messages.push(`UPCOMING · ${e.title}${e.activityReason ? ` · ${e.activityReason}` : ''}`));
+  state.weather.slice(0,2).forEach(f => { const p = f.properties || {}; messages.push(`WEATHER · ${p.alert_name_en || p.alert_short_name_en || 'Alert'} · ${p.feature_name_en || 'Calgary region'}`); });
+  if (!messages.length) messages.push('No live operational updates available.'); els.ticker.textContent = messages.join('     ◆     ');
 }
 function renderAll() { renderQueue(); renderMap(); if (state.selectedId) renderDetail(); renderKPIs(); renderTicker(); }
 
@@ -561,7 +727,7 @@ function exportSelectedEvent() {
 }
 function fitEvents() {
   if (!mapReady || !map) return;
-  const pts = state.allEvents.filter(e => e.coords).map(e => e.coords);
+  const pts = state.allEvents.filter(e => e.coords && (e.operationalClass !== 'PLANNED' || state.layersEnabled.PLANNED)).map(e => e.coords);
   if (!pts.length) {
     map.fitBounds(CONFIG.calgaryBounds, { padding: [44, 44], maxZoom: 13 });
     return;
@@ -585,7 +751,7 @@ function cacheElements() {
     'clock','dateLabel','systemHealth','healthText','openQuickCreateBtn','newEventBtn','eventSearch','filterRow','queueCount','lastRefresh','eventQueue',
     'fitEventsBtn','refreshBtn','layersToggleBtn','layerBox','closeLayersBtn','mapStatus','mapHint','eventDrawer','closeDrawerBtn','detailSource','detailTitle','detailPriority','detailStatus','detailId','detailType',
     'detailStart','detailUpdated','detailDescription','statusRail','undoStatusBtn','primaryWorkflowBtn','cameraCommandBtn','moreActionsBtn','detailTabs','actionGrid',
-    'noteInput','addNoteBtn','notesList','nearestCameraBtn','exportEventBtn','timeline','cameraPreview','showCamerasBtn','kpiIncidents','kpiDetours','kpiHigh','kpiWeather','ticker',
+    'noteInput','addNoteBtn','notesList','nearestCameraBtn','exportEventBtn','timeline','cameraPreview','showCamerasBtn','kpiIncidents','kpiActiveClosures','kpiUpcoming','kpiHigh','kpiWeather','ticker',
     'mapContextMenu','contextCreateEventBtn','contextCenterBtn','manualEventModal','closeModalBtn','cancelModalBtn','manualEventForm','useMapCenterBtn','cameraModal','closeCameraModalBtn','cameraModalList','toastStack'
   ].forEach(id => els[id] = document.getElementById(id));
 }
